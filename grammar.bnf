@@ -1,0 +1,23 @@
+<CAMPAIGN> ::= (<TEST>)+;
+
+<TEST> ::=	"name:" <WORD> NL
+			"prorgrams: ["					<PROGRAMS> "]"		NL
+			"data_protection:"				<DATA_PROTECTION>	NL
+			"control_flow_protection:"		<CONTROL_FLOW>		NL
+			["functions: ["					<FUNCTIONS> "]"		NL] 
+			["vars:["						<VARS> "]"			NL];
+
+<PROGRAM>	::= <WORD> "." <EXT;
+<EXT>		::= "c" | "cpp" | "rst";
+<PROGRAMS>  ::= <PROGRAM> ("," <PROGRAM>)+;
+
+<DATA_PROTECTION>	::= "eddi" | "seddi" | "fdsc" | "none";
+<CONTROL_FLOW>	::= "cfcss" | "rasm" | "inter-rasm" | "none";
+
+<WORD>		::=	(<LETTER> | <NUMBER> | "_")*;
+<LETTER>	::=	  "A" | "B" | "C" | "D" | "E" | "F" | "G"
+				| "H" | "I" | "J" | "K" | "L" | "M" | "N"
+				| "O" | "P" | "Q" | "R" | "S" | "T" | "U"
+				| "V" | "W" | "X" | "Y" | "Z" ;
+<NUMBER>	::=	  "0" | "1" | "2" | "3" | "4" | "5" | "6" 
+				| "7" | "8" | "9";
