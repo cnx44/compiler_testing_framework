@@ -1,2 +1,4 @@
 note.md
 ./.venv
+
+*.pyc
