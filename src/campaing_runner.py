@@ -3,20 +3,21 @@ from pathlib import Path
 import subprocess
 import re
 import shlex
-import time
+import platform
+import shutil
 
 class Oracle:
     src:        str
     exe:        str
     results:    dict
     size:       int
-    time:       float
 
-    def __init__(self):
+    def __init__(self, debugger: str | None = None):
         self.src = ""
         self.exe = ""
         self.results = {}
         self.size = 0
+        self.debugger = debugger
 
     def oracle_builder(self, test_path: str, args: list[str] | None = None):
         file_path = Path(test_path)
@@ -33,29 +34,60 @@ class Oracle:
             if compile_result.returncode != 0:
                 raise RuntimeError(f"Compilation failed:\n{compile_result.stderr}")
             
-            start = time.perf_counter()
             run_result = subprocess.run(
                 [self._exe_command(), *args],
                 capture_output=True,
                 text=True,
             )
-            self.time = time.perf_counter() - start
             
             self.results = {
                 "stdout": run_result.stdout,
                 "stderr": run_result.stderr,
             }
             self.results.update(self._debug_snapshot(args))
-            self.size = Path(self.exe).stat().st_size
-
+            self.size = len(run_result.stdout)
             return self.results
         finally:
             self._cleanup()
 
     def _debug_snapshot(self, args: list[str]):
         return_line = self._main_return_line()
-        debug_result = subprocess.run(
-            [
+        errors = []
+        for debugger in self._debuggers():
+            debug_result = self._run_debugger(debugger, return_line, args)
+            if debug_result.returncode != 0:
+                errors.append(f"{debugger}: {debug_result.stderr.strip()}")
+                continue
+
+            variables = {
+                **self._parse_debug_variables(debug_result.stdout, 
+                                              "@@ARGS@@", 
+                                              "@@LOCALS@@"),
+                **self._parse_debug_variables(debug_result.stdout, 
+                                              "@@LOCALS@@", 
+                                              "@@REGISTERS@@"),
+            }
+            registers = self._parse_debug_registers(debug_result.stdout)
+            if variables and registers:
+                return {"variables": variables, "registers": registers}
+            errors.append(f"{debugger}: no variables or registers were found")
+
+        details = "\n".join(errors) or "Neither gdb nor lldb is installed."
+        raise RuntimeError(f"Debug snapshot failed:\n{details}")
+
+    def _debuggers(self):
+        if self.debugger is not None:
+            candidates = [self.debugger]
+        elif platform.system() == "Darwin":
+            # LLDB ships with Xcode and works without GDB's macOS code-signing setup.
+            candidates = ["lldb", "gdb"]
+        else:
+            candidates = ["gdb", "lldb"]
+        return [debugger for debugger in candidates if shutil.which(debugger)]
+
+    def _run_debugger(self, debugger: str, return_line: int, args: list[str]):
+        if debugger == "gdb":
+            command = [
                 "gdb", "--batch", "-q", self.exe,
                 "-ex", f"break {self.src}:{return_line}",
                 "-ex", f"run {shlex.join(args)}",
@@ -65,41 +97,41 @@ class Oracle:
                 "-ex", "info locals",
                 "-ex", "printf \"@@REGISTERS@@\\n\"",
                 "-ex", "info registers",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if debug_result.returncode != 0:
-            raise RuntimeError(f"Debug snapshot failed:\n{debug_result.stderr}")
+            ]
+        elif debugger == "lldb":
+            source_name = shlex.quote(Path(self.src).name)
+            command = [
+                "lldb", "--batch", "--no-lldbinit", self.exe,
+                "-o", f"breakpoint set --file {source_name} --line {return_line}",
+                "-o", f"run {shlex.join(args)}",
+                "-o", "script print('@@ARGS@@')",
+                "-o", "frame variable",
+                "-o", "script print('@@LOCALS@@')",
+                "-o", "script print('@@REGISTERS@@')",
+                "-o", "register read",
+            ]
+        else:
+            raise ValueError(f"Unsupported debugger: {debugger}")
+        return subprocess.run(command, capture_output=True, text=True)
 
-        variables = {
-            **self._parse_gdb_variables(debug_result.stdout, "@@ARGS@@", "@@LOCALS@@"),
-            **self._parse_gdb_variables(debug_result.stdout, "@@LOCALS@@", "@@REGISTERS@@"),
-        }
-        registers = self._parse_gdb_registers(debug_result.stdout)
-
-        if not variables or not registers:
-            raise RuntimeError(f"Debug snapshot did not contain variables and registers:\n{debug_result.stdout}")
-
-        return {
-            "variables": variables,
-            "registers": registers,
-        }
-
-    def _parse_gdb_variables(self, output: str, start: str, end: str):
+    def _parse_debug_variables(self, output: str, start: str, end: str):
         section = self._section(output, start, end)
         variables = {}
         for line in section.splitlines():
             if " = " in line:
                 name, value = line.split(" = ", 1)
-                variables[name.strip()] = value.strip()
+                # GDB prints "name = value"; LLDB prints "(type) name = value".
+                match = re.match(r"^\s*(?:\([^)]*\)\s*)?([A-Za-z_]\w*)$", name)
+                if match:
+                    variables[match.group(1)] = value.strip()
         return variables
 
-    def _parse_gdb_registers(self, output: str):
+    def _parse_debug_registers(self, output: str):
         section = self._section(output, "@@REGISTERS@@", None)
         registers = {}
         for line in section.splitlines():
-            match = re.match(r"^(\S+)\s+(\S+)", line)
+            # GDB: "rax 0x..."; LLDB: "rax = 0x...".
+            match = re.match(r"^\s*(\S+)\s+(?:=\s+)?(\S+)", line)
             if match:
                 registers[match.group(1)] = match.group(2)
         return registers
