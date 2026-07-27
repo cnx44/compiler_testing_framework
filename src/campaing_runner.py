@@ -3,12 +3,14 @@ from pathlib import Path
 import subprocess
 import re
 import shlex
+import time
 
 class Oracle:
     src:        str
     exe:        str
     results:    dict
     size:       int
+    time:       float
 
     def __init__(self):
         self.src = ""
@@ -31,18 +33,21 @@ class Oracle:
             if compile_result.returncode != 0:
                 raise RuntimeError(f"Compilation failed:\n{compile_result.stderr}")
             
+            start = time.perf_counter()
             run_result = subprocess.run(
                 [self._exe_command(), *args],
                 capture_output=True,
                 text=True,
             )
+            self.time = time.perf_counter() - start
             
             self.results = {
                 "stdout": run_result.stdout,
                 "stderr": run_result.stderr,
             }
             self.results.update(self._debug_snapshot(args))
-            self.size = len(run_result.stdout)
+            self.size = Path(self.exe).stat().st_size
+
             return self.results
         finally:
             self._cleanup()
