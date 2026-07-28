@@ -1,1 +1,5 @@
+<<<<<<< HEAD
 lark==1.3.1
+=======
+lark==1.2.2
+>>>>>>> 1e2380c (renamed reqs and updated gitignore)
