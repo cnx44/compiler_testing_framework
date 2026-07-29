@@ -287,7 +287,7 @@ class CampaignRun:
         return self.log
 
     def _entry_source(self, programs: list[str]):
-        return next((program for program in programs if Path(program).suffix in {".c", ".cpp", ".rst"}), None)
+        return next((program for program in programs if Path(program).suffix in {".c", ".cpp", ".rs"}), None)
 
     def _args_from_values_file(self, source_file: str):
         values_path = Path(source_file).with_suffix(".values")
