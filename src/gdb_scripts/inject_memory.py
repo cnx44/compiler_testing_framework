@@ -1,6 +1,11 @@
 import gdb
 import random
 import os
+import sys
+
+# Tell GDB's Python interpreter to look in the current folder for imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from gdb_utils import continue_and_dump_state
 
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
@@ -46,10 +51,12 @@ def inject_diagnostic_memory():
                 ptr_val = gdb.parse_and_eval(payload_ptr)
                 type_code = ptr_val.type.strip_typedefs().code
                 
-                # Extract base physical address
+               # Extract base physical address
                 if type_code == gdb.TYPE_CODE_PTR:
                     base_addr = int(ptr_val)
                 else:
+                    if ptr_val.address is None:
+                        raise ValueError(f"'{payload_ptr}' has no memory address (likely in a register).")
                     base_addr = int(ptr_val.address)
                     
                 # Bulletproof DWARF check: Test if the address is actually readable
@@ -100,7 +107,7 @@ def inject_diagnostic_memory():
     # Random step forward into the execution
     steps = random.randint(1, max_steps)
     print(f"[DIAG] Stepping forward {steps} instructions...")
-    gdb.execute(f"stepi {steps}", to_string=True)
+    gdb.execute(f"nexti {steps}", to_string=True)
 
     # --- Strategy: Safe Stack Bounds (Fallback) ---
     if target_address is None:
@@ -141,11 +148,12 @@ def inject_diagnostic_memory():
 
     print(f"[*] Injected memory successfully.")
     
-    gdb.execute("continue")
+    # Continue execution and dump the state for the Oracle to read
+    continue_and_dump_state()
 
 try:
     inject_diagnostic_memory()
 except Exception as e:
-    print(f"[FATAL] Uncaught Exception: {e}")
+    print(f"[FATAL] Uncaught Exception in memory injection: {e}")
 finally:
     gdb.execute("quit")

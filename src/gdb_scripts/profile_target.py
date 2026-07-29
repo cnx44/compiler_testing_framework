@@ -34,6 +34,8 @@ def profile():
             print("PROFILED_STEPS=ERROR_NO_FUNC")
             return
 
+        # Route output to avoid cluttering stdout during execution
+        gdb.execute("set args > .inferior_out.txt")
         gdb.execute("start")
         gdb.execute("delete")
         gdb.execute(f"break {target_func}")
@@ -56,9 +58,12 @@ def profile():
         max_steps = 0
         while True:
             frame = gdb.newest_frame()
+            
             if frame.name() != target_func:
                 break
-            gdb.execute("stepi", to_string=True)
+                
+            # Use nexti to step OVER function calls, staying in the target scope
+            gdb.execute("nexti", to_string=True)
             max_steps += 1
 
         # Output both metrics

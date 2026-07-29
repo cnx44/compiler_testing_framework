@@ -1,6 +1,11 @@
 import gdb
 import random
 import os
+import sys
+
+# Tell GDB's Python interpreter to look in the current folder for imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from gdb_utils import continue_and_dump_state
 
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
@@ -45,7 +50,7 @@ def inject_smart_register():
         bp.delete()
 
         steps = random.randint(1, max_steps)
-        gdb.execute(f"stepi {steps}", to_string=True)
+        gdb.execute(f"nexti {steps}", to_string=True)
 
         # Apply the Data-Only filter if the flag was passed in Bash
         if data_only_mode == "1":
@@ -76,10 +81,11 @@ def inject_smart_register():
         gdb.execute(f"set ${target} = {new_val}")
         print(f"[*] Injected fault into {target} (Size: {max_bit + 1}-bit), flipped bit {bit}")
 
-        gdb.execute("continue")
+        # Continue execution and dump the state for the Oracle to read
+        continue_and_dump_state()
 
     except Exception as e:
-        pass
+        print(f"[FATAL] Uncaught Exception in register injection: {e}")
 
 inject_smart_register()
 gdb.execute("quit")
