@@ -18,10 +18,10 @@ CONTROL_FLOW_K:		"control_flow_protection:"
 FUNCTIONS_K:		"functions:"
 VARS_K:				"vars:"
 
-COMPILER_FORMAT: "c" | "cpp" | "rst" | "none"
+COMPILER_FORMAT: "c" | "cpp" | "rs" | "none"
 DATA_PROTECTION: "eddi" | "seddi" | "fdsc" | "none"
 CONTROL_FLOW:	 "cfcss" | "rasm" | "inter-rasm" | "none"
-EXT:			 "c" | "cpp" | "rst"
+EXT:			 "c" | "cpp" | "rs"
 
 WORD: /[A-Za-z0-9_-]+/
 NL: /\r?\n/

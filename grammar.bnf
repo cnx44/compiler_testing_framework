@@ -8,7 +8,7 @@
 			["vars:["						<VARS> "]"			NL];
 
 <PROGRAM>	::= <WORD> "." <EXT;
-<EXT>		::= "c" | "cpp" | "rst";
+<EXT>		::= "c" | "cpp" | "rs";
 <PROGRAMS>  ::= <PROGRAM> ("," <PROGRAM>)+;
 
 <DATA_PROTECTION>	::= "eddi" | "seddi" | "fdsc" | "none";
