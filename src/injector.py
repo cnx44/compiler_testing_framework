@@ -3,7 +3,7 @@ import re
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
-from models import TerminationEvent, ExecutionState, ExecutionResult
+from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
 class BaseInjector(ABC):
 
@@ -11,7 +11,7 @@ class BaseInjector(ABC):
         self.target_bin = target_bin
         self.target_src = target_src
         self.target_func = target_func
-        self.base_dir = Path(__file__).parent.resolve()
+        self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
 
     @abstractmethod
     def setup(self) -> dict:
@@ -157,7 +157,7 @@ class RegisterInjector(BaseInjector):
 
     @property
     def gdb_script(self) -> str:
-        return str(self.base_dir / "inject_smart_register.py")
+        return str(self.base_dir / "inject_registers.py")
 
     def setup(self) -> dict:
         profile_data = self.profile_target()
@@ -192,12 +192,12 @@ class MemoryInjector(BaseInjector):
             raise RuntimeError("Profiling failed to extract maximum dynamic instructions.")
             
         return {
-            "TARGET_FUNC": self.target_func,
-            "MAX_STEPS": profile_data["MAX_STEPS"],
-            "PAYLOAD_PTR": self.payload_ptr,
-            "LENGTH_VAR": self.length_var,
-            "DATA_TYPE_SIZE": self.data_type_size,
-            "DATA_ONLY_MODE": "1" if self.data_only else "0"
+            "TARGET_FUNC"       : self.target_func,
+            "MAX_STEPS"         : profile_data["MAX_STEPS"],
+            "PAYLOAD_PTR"       : self.payload_ptr,
+            "LENGTH_VAR"        : self.length_var,
+            "DATA_TYPE_SIZE"    : self.data_type_size,
+            "DATA_ONLY_MODE"    : "1" if self.data_only else "0"
         }
 
 
