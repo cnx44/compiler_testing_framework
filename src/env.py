@@ -1,11 +1,7 @@
 from dataclasses import dataclass
 
-@dataclass()
+@dataclass
 class Envoirment:
-    aspis_path: str
-    vanilla_compiler: str
-
-    def __init__(self):
-        self.aspis_path         = ""
-        self.vanilla_compiler   = ""
-
+    aspis_path: str = ""
+    vanilla_compiler: str = "clang"
+    llvm_path: str = ""
