@@ -18,9 +18,12 @@ class StubRunner(ProgramRunner):
     def __init__(self, environment=None, debugger=None):
         super().__init__(environment or Envoirment(), debugger)
         self.compiled_sources = []
+        self.compiler_flags = []
 
-    def _compile(self, sources):
+    def _compile(self, sources, compiler_flags=None):
         self.compiled_sources = sources
+        self.compiler_flags = compiler_flags or []
+        Path(self.exe).write_bytes(b"binary")
 
 
 class ProgramRunnerTest(unittest.TestCase):
@@ -49,8 +52,11 @@ class ProgramRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "missing.c"):
             runner._source_files(["missing.c"])
 
+    @patch("src.campaing_runner.time.perf_counter", side_effect=[10.0, 10.25])
     @patch("src.campaing_runner.subprocess.run")
-    def test_run_compiles_executes_collects_snapshot_and_cleans_up(self, run_process):
+    def test_run_compiles_executes_collects_snapshot_and_cleans_up(
+        self, run_process, _perf_counter
+    ):
         run_process.return_value = subprocess.CompletedProcess(
             args=[], returncode=7, stdout="out", stderr="err"
         )
@@ -60,15 +66,20 @@ class ProgramRunnerTest(unittest.TestCase):
         )
 
         with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            results = runner.run([source.name], ["one", "two"])
+            results = runner.run(
+                [source.name], ["one", "two"], compiler_flags=["-lm"]
+            )
 
         self.assertEqual(results["returncode"], 7)
         self.assertEqual(results["stdout"], "out")
         self.assertEqual(results["stderr"], "err")
         self.assertEqual(results["variables"], {"x": "1"})
-        self.assertEqual(runner.size, 3)
+        self.assertEqual(results["execution_time_seconds"], 0.25)
+        self.assertEqual(results["binary_size_bytes"], 6)
+        self.assertEqual(runner.size, 6)
         self.assertEqual(runner.compiled_sources, [Path(source.name)])
-        runner._debug_snapshot.assert_called_once_with(["one", "two"])
+        self.assertEqual(runner.compiler_flags, ["-lm"])
+        runner._debug_snapshot.assert_called_once_with(["one", "two"], None)
         self.assertEqual(run_process.call_args.args[0][1:], ["one", "two"])
         self.assertIsNone(runner._build_dir)
         self.assertFalse(Path(runner.exe).exists())
@@ -126,6 +137,64 @@ rax = 0x1
         self.assertEqual(snapshot["registers"]["rax"], "0x1")
         self.assertEqual(runner._run_debugger.call_count, 2)
 
+    def test_debug_snapshot_collects_requested_global_variables(self):
+        runner = StubRunner()
+        runner._main_return_line = Mock(return_value=10)
+        runner._debuggers = Mock(return_value=["gdb"])
+        runner._run_debugger = Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                """@@ARGS@@
+No arguments.
+@@LOCALS@@
+No locals.
+@@GLOBALS@@
+sum = 2
+@@REGISTERS@@
+rax = 0x2
+""",
+                "",
+            )
+        )
+
+        snapshot = runner._debug_snapshot([], ["sum"])
+
+        self.assertEqual(snapshot["variables"], {"sum": "2"})
+        self.assertEqual(snapshot["registers"], {"rax": "0x2"})
+        runner._run_debugger.assert_called_once_with("gdb", 10, [], ["sum"])
+
+    @patch("src.campaing_runner.subprocess.run")
+    def test_gdb_command_prints_requested_global_variables(self, run_process):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
+        runner = StubRunner()
+        runner.exe = "/tmp/program"
+        runner.src = "main.c"
+
+        runner._run_debugger("gdb", 10, [], ["sum"])
+
+        command = run_process.call_args.args[0]
+        self.assertIn('printf "@@GLOBALS@@\\n"', command)
+        self.assertIn('printf "sum = "', command)
+        self.assertIn("output sum", command)
+
+    @patch("src.campaing_runner.subprocess.run")
+    def test_lldb_command_prints_requested_global_variables(self, run_process):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
+        runner = StubRunner()
+        runner.exe = "/tmp/program"
+        runner.src = "main.c"
+
+        runner._run_debugger("lldb", 10, [], ["sum"])
+
+        command = run_process.call_args.args[0]
+        self.assertIn("script print('@@GLOBALS@@')", command)
+        self.assertIn("target variable sum", command)
+
+    def test_debugger_rejects_invalid_variable_names(self):
+        with self.assertRaisesRegex(ValueError, "bad-name"):
+            StubRunner()._run_debugger("gdb", 1, [], ["bad-name"])
+
     def test_debug_snapshot_reports_when_no_debugger_is_available(self):
         runner = StubRunner()
         runner._main_return_line = Mock(return_value=1)
@@ -146,7 +215,7 @@ class OracleRunnerTest(unittest.TestCase):
         runner.exe = "/tmp/output"
         sources = [Path("main.c"), Path("helper.cpp")]
 
-        runner._compile(sources)
+        runner._compile(sources, ["-Wall", "-lm"])
 
         run_process.assert_called_once_with(
             [
@@ -155,6 +224,8 @@ class OracleRunnerTest(unittest.TestCase):
                 "-O0",
                 "main.c",
                 "helper.cpp",
+                "-Wall",
+                "-lm",
                 "-o",
                 "/tmp/output",
             ],
@@ -218,7 +289,9 @@ class AspisRunnerTest(unittest.TestCase):
             )
             runner.exe = str(Path(directory) / "program")
 
-            runner._compile([Path("main.c"), Path("helper.cpp")])
+            runner._compile(
+                [Path("main.c"), Path("helper.cpp")], ["-Wall", "-lm"]
+            )
 
         run_process.assert_called_once_with(
             [
@@ -232,11 +305,40 @@ class AspisRunnerTest(unittest.TestCase):
                 "/tools/llvm",
                 "--seddi",
                 "--inter-rasm",
-                "main.c",
-                "helper.cpp",
+                str(Path("main.c").resolve()),
+                str(Path("helper.cpp").resolve()),
+                "-Wall",
+                "-lm",
             ],
             capture_output=True,
             text=True,
+            cwd=Path(directory),
+        )
+
+    def test_compiler_paths_remain_relative_to_campaign_directory(self):
+        runner = AspisRunner(Envoirment())
+
+        flags = runner._compiler_flags_for_build_dir([
+            "-Iinclude",
+            "-L",
+            "lib",
+            "-include",
+            "config.h",
+            "--sysroot=sysroot",
+            "-lm",
+        ])
+
+        self.assertEqual(
+            flags,
+            [
+                f"-I{Path('include').resolve()}",
+                "-L",
+                str(Path("lib").resolve()),
+                "-include",
+                str(Path("config.h").resolve()),
+                f"--sysroot={Path('sysroot').resolve()}",
+                "-lm",
+            ],
         )
 
     @patch("src.campaing_runner.subprocess.run")
@@ -272,7 +374,7 @@ class AspisRunnerTest(unittest.TestCase):
 
 
 class CampaignRunTest(unittest.TestCase):
-    def _campaign(self, programs=None, variables=None):
+    def _campaign(self, programs=None, variables=None, compiler_flags=None):
         return Campaign(
             runs=[
                 RunnerTest(
@@ -280,6 +382,7 @@ class CampaignRunTest(unittest.TestCase):
                     programs=programs or ["main.c", "helper.cpp"],
                     data_protection=DataProtectionMode.FDSC,
                     control_flow_protection=ControlFlowMode.RASM,
+                    compiler_flags=compiler_flags or [],
                     vars=variables or ["x"],
                 )
             ]
@@ -295,23 +398,42 @@ class CampaignRunTest(unittest.TestCase):
             "stdout": "ok",
             "stderr": "",
             "variables": {"x": "1"},
+            "execution_time_seconds": 1.0,
+            "binary_size_bytes": 100,
         }
         aspis_results = dict(oracle_results)
-        oracle_class.return_value.run.return_value = oracle_results
-        aspis_class.return_value.run.return_value = aspis_results
+        order = []
+        oracle_class.return_value.compile.side_effect = (
+            lambda programs, flags: order.append("oracle compile")
+        )
+        aspis_class.return_value.compile.side_effect = (
+            lambda programs, flags: order.append("aspis compile")
+        )
+        oracle_class.return_value.execute.side_effect = lambda args, variables: (
+            order.append("oracle execute") or oracle_results
+        )
+        aspis_class.return_value.execute.side_effect = lambda args, variables: (
+            order.append("aspis execute") or aspis_results
+        )
         environment = Envoirment(aspis_path="/aspis", vanilla_compiler="/clang")
 
         with tempfile.TemporaryDirectory() as directory:
             log_path = Path(directory) / "campaign.log"
             campaign_run = CampaignRun(
-                self._campaign(), environment, str(log_path), debugger="gdb"
+                self._campaign(compiler_flags=["-lm"]),
+                environment,
+                str(log_path),
+                debugger="gdb",
             )
             log = campaign_run.run_campaing(["a", "b"])
             written_log = log_path.read_text(encoding="utf-8")
 
         oracle_class.assert_called_once_with(environment, "gdb")
-        oracle_class.return_value.run.assert_called_once_with(
-            ["main.c", "helper.cpp"], ["a", "b"]
+        oracle_class.return_value.compile.assert_called_once_with(
+            ["main.c", "helper.cpp"], ["-lm"]
+        )
+        oracle_class.return_value.execute.assert_called_once_with(
+            ["a", "b"], ["x"]
         )
         aspis_class.assert_called_once_with(
             environment,
@@ -319,11 +441,23 @@ class CampaignRunTest(unittest.TestCase):
             control_flow_protection=ControlFlowMode.RASM,
             debugger="gdb",
         )
-        aspis_class.return_value.run.assert_called_once_with(
-            ["main.c", "helper.cpp"], ["a", "b"]
+        aspis_class.return_value.compile.assert_called_once_with(
+            ["main.c", "helper.cpp"], ["-lm"]
+        )
+        aspis_class.return_value.execute.assert_called_once_with(
+            ["a", "b"], ["x"]
+        )
+        self.assertEqual(
+            order,
+            ["oracle compile", "aspis compile", "oracle execute", "aspis execute"],
         )
         self.assertIn("returncode: OK", log)
+        self.assertIn("Compiler flags: -lm", log)
         self.assertIn("  OK x: oracle=1 aspis=1", log)
+        self.assertEqual(
+            campaign_run.results[0]["difference"]["binary_size_bytes"],
+            {"absolute": 0, "percent": 0.0},
+        )
         self.assertEqual(written_log, "\n".join(log))
 
     @patch("src.campaing_runner.AspisRunner")
@@ -334,9 +468,11 @@ class CampaignRunTest(unittest.TestCase):
             "stdout": "",
             "stderr": "",
             "variables": {},
+            "execution_time_seconds": 1.0,
+            "binary_size_bytes": 100,
         }
-        oracle_class.return_value.run.return_value = results
-        aspis_class.return_value.run.return_value = results
+        oracle_class.return_value.execute.return_value = results
+        aspis_class.return_value.execute.return_value = results
 
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "main.c"
@@ -353,8 +489,9 @@ class CampaignRunTest(unittest.TestCase):
             )
             campaign_run.run_campaing()
 
-        oracle_class.return_value.run.assert_called_once_with(
-            [str(source)], ["first", "second"]
+        oracle_class.return_value.compile.assert_called_once_with([str(source)], [])
+        oracle_class.return_value.execute.assert_called_once_with(
+            ["first", "second"], ["x"]
         )
 
     def test_skips_run_without_supported_entry_source(self):
@@ -369,7 +506,7 @@ class CampaignRunTest(unittest.TestCase):
 
     @patch("src.campaing_runner.OracleRunner")
     def test_records_runner_errors_and_continues(self, oracle_class):
-        oracle_class.return_value.run.side_effect = RuntimeError("compiler down")
+        oracle_class.return_value.compile.side_effect = RuntimeError("compiler down")
         with tempfile.TemporaryDirectory() as directory:
             runner = CampaignRun(
                 self._campaign(),
@@ -387,18 +524,26 @@ class CampaignRunTest(unittest.TestCase):
                 "stdout": "expected",
                 "stderr": "",
                 "variables": {"x": "1"},
+                "execution_time_seconds": 1.0,
+                "binary_size_bytes": 100,
             },
             {
                 "returncode": 1,
                 "stdout": "actual",
                 "stderr": "",
                 "variables": {},
+                "execution_time_seconds": 1.5,
+                "binary_size_bytes": 125,
             },
             ["x"],
         )
         self.assertIn("returncode: DIFF", lines)
         self.assertIn("stdout: DIFF", lines)
         self.assertIn("stderr: OK", lines)
+        self.assertIn(
+            "  binary_size_bytes: oracle=100 bytes, aspis=125 bytes, difference=+25 bytes (+25.00%)",
+            lines,
+        )
         self.assertIn("  DIFF x: oracle=1 aspis=<missing>", lines)
 
 

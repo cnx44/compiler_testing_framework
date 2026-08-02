@@ -32,6 +32,7 @@ class ParseRunnerConfigTest(unittest.TestCase):
 programs: [main.c, utils.cpp]
 data_protection: eddi
 control_flow_protection: inter-rasm
+compiler_flags: [-lm, -DTRACE=1, -I../include]
 functions: [main, helper]
 vars: [x, y]
 """
@@ -46,6 +47,7 @@ vars: [x, y]
                     programs=["main.c", "utils.cpp"],
                     data_protection=DataProtectionMode.EDDI,
                     control_flow_protection=ControlFlowMode.INTER_RASM,
+                    compiler_flags=["-lm", "-DTRACE=1", "-I../include"],
                     functions=["main", "helper"],
                     vars=["x", "y"],
                 )
@@ -70,6 +72,7 @@ vars: []
         self.assertEqual(len(campaign.runs), 2)
         self.assertEqual(campaign.runs[0].functions, [])
         self.assertEqual(campaign.runs[0].vars, [])
+        self.assertEqual(campaign.runs[0].compiler_flags, [])
         self.assertEqual(campaign.runs[1].programs, ["two.cpp", "notes.rs"])
         self.assertIs(
             campaign.runs[0].data_protection,
