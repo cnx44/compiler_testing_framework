@@ -1,7 +1,8 @@
 campaign: test+
 
-test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL compiler_flags? functions? vars?
+test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL execution_repetitions? compiler_flags? functions? vars?
 
+execution_repetitions: EXECUTION_REPETITIONS_K POSITIVE_INT NL
 compiler_flags: COMPILER_FLAGS_K "[" compiler_flag_list? "]" NL
 functions: FUNCTIONS_K "[" word_list? "]" NL
 vars:	   VARS_K "[" word_list? "]" NL
@@ -17,6 +18,7 @@ COMPILER_FORMAT_K:	"compiler_format:"
 PROGRAMS_K:			"programs:"
 DATA_PROTECTION_K:	"data_protection:"
 CONTROL_FLOW_K:		"control_flow_protection:"
+EXECUTION_REPETITIONS_K: "execution_repetitions:"
 COMPILER_FLAGS_K:	"compiler_flags:"
 FUNCTIONS_K:		"functions:"
 VARS_K:				"vars:"
@@ -25,6 +27,7 @@ COMPILER_FORMAT: "c" | "cpp" | "rs" | "none"
 DATA_PROTECTION: "eddi" | "seddi" | "fdsc" | "none"
 CONTROL_FLOW:	 "cfcss" | "rasm" | "inter-rasm" | "none"
 EXT:			 "c" | "cpp" | "rs"
+POSITIVE_INT: /[1-9][0-9]*/
 COMPILER_FLAG: /[^\s,\[\]]+/
 
 WORD: /[A-Za-z0-9_-]+/

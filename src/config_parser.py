@@ -26,6 +26,7 @@ class RunnerTest:
     functions: list[str] = field(default_factory=list)
     vars: list[str] = field(default_factory=list)
     compiler_flags: list[str] = field(default_factory=list)
+    execution_repetitions: int = 1
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,9 @@ class RunnerConfigTransformer(Transformer):
     def CONTROL_FLOW(self, token):
         return self._token_to_enum(ControlFlowMode, token)
 
+    def POSITIVE_INT(self, token):
+        return int(token)
+
     def program(self, items):
         return f"{items[0]}.{items[1]}"
 
@@ -68,6 +72,10 @@ class RunnerConfigTransformer(Transformer):
     def compiler_flags(self, items):
         lists = [item for item in items if isinstance(item, list)]
         return ("compiler_flags", lists[0] if lists else [])
+
+    def execution_repetitions(self, items):
+        repetitions = next(item for item in items if isinstance(item, int))
+        return ("execution_repetitions", repetitions)
 
     def functions(self, items):
         lists = [item for item in items if isinstance(item, list)]
@@ -92,6 +100,7 @@ class RunnerConfigTransformer(Transformer):
               data_protection=values[2],
               control_flow_protection=values[3],
               compiler_flags=optional.get("compiler_flags", []),
+              execution_repetitions=optional.get("execution_repetitions", 1),
               functions=optional.get("functions", []),
               vars=optional.get("vars", []),
           )

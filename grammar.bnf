@@ -4,6 +4,7 @@
 			"prorgrams: ["					<PROGRAMS> "]"		NL
 			"data_protection:"				<DATA_PROTECTION>	NL
 			"control_flow_protection:"		<CONTROL_FLOW>		NL
+			["execution_repetitions:"		<POSITIVE_INT>		NL]
 			["compiler_flags: ["			<COMPILER_FLAGS> "]"	NL]
 			["functions: ["					<FUNCTIONS> "]"		NL] 
 			["vars:["						<VARS> "]"			NL];
@@ -14,6 +15,7 @@
 
 <DATA_PROTECTION>	::= "eddi" | "seddi" | "fdsc" | "none";
 <CONTROL_FLOW>	::= "cfcss" | "rasm" | "inter-rasm" | "none";
+<POSITIVE_INT> ::= <NON_ZERO_NUMBER> (<NUMBER>)*;
 <COMPILER_FLAGS> ::= <COMPILER_FLAG> ("," <COMPILER_FLAG>)*;
 <COMPILER_FLAG> ::= any non-whitespace sequence excluding ",", "[" and "]";
 
@@ -24,3 +26,4 @@
 				| "V" | "W" | "X" | "Y" | "Z" ;
 <NUMBER>	::=	  "0" | "1" | "2" | "3" | "4" | "5" | "6" 
 				| "7" | "8" | "9";
+<NON_ZERO_NUMBER> ::= "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";

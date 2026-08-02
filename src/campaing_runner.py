@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
+import math
 from pathlib import Path
 import platform
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import tempfile
 import time
@@ -57,24 +59,43 @@ class ProgramRunner(ABC):
         self,
         args: list[str] | None = None,
         variables_to_check: list[str] | None = None,
+        execution_repetitions: int = 1,
     ):
         """Execute an already compiled binary and collect its observable state."""
         if self._build_dir is None or not Path(self.exe).is_file():
             raise RuntimeError("The program must be compiled before it can be executed.")
+        if not isinstance(execution_repetitions, int) or execution_repetitions < 1:
+            raise ValueError("execution_repetitions must be a positive integer.")
 
         args = args or []
-        started_at = time.perf_counter()
-        run_result = subprocess.run(
-            [self._exe_command(), *args],
-            capture_output=True,
-            text=True,
+        execution_times = []
+        run_result = None
+        for _ in range(execution_repetitions):
+            started_at = time.perf_counter()
+            run_result = subprocess.run(
+                [self._exe_command(), *args],
+                capture_output=True,
+                text=True,
+            )
+            execution_times.append(time.perf_counter() - started_at)
+
+        mean = statistics.fmean(execution_times)
+        standard_deviation = (
+            statistics.stdev(execution_times)
+            if execution_repetitions > 1
+            else 0.0
         )
-        elapsed = time.perf_counter() - started_at
         self.results = {
             "stdout": run_result.stdout,
             "stderr": run_result.stderr,
             "returncode": run_result.returncode,
-            "execution_time_seconds": elapsed,
+            "execution_time_seconds": mean,
+            "execution_time_samples_seconds": execution_times,
+            "execution_time_stddev_seconds": standard_deviation,
+            "execution_time_standard_error_seconds": (
+                standard_deviation / math.sqrt(execution_repetitions)
+            ),
+            "execution_repetitions": execution_repetitions,
             "binary_size_bytes": self.size,
         }
         self.results.update(self._debug_snapshot(args, variables_to_check))
@@ -86,11 +107,14 @@ class ProgramRunner(ABC):
         args: list[str] | None = None,
         compiler_flags: list[str] | None = None,
         variables_to_check: list[str] | None = None,
+        execution_repetitions: int = 1,
     ):
         """Compile and execute a program, cleaning temporary artifacts afterwards."""
         try:
             self.compile(programs, compiler_flags)
-            return self.execute(args, variables_to_check)
+            return self.execute(
+                args, variables_to_check, execution_repetitions
+            )
         finally:
             self.cleanup()
 
@@ -433,6 +457,9 @@ class CampaignRun:
                 "Compiler flags: "
                 f"{shlex.join(run.compiler_flags) if run.compiler_flags else '(none)'}"
             )
+            self.log.append(
+                f"Execution repetitions: {run.execution_repetitions}"
+            )
             self.log.append(f"Args: {shlex.join(run_args) if run_args else '(none)'}")
 
             oracle_runner = OracleRunner(self.environment, self.debugger)
@@ -449,8 +476,12 @@ class CampaignRun:
                 oracle_runner.compile(run.programs, run.compiler_flags)
                 aspis_runner.compile(run.programs, run.compiler_flags)
 
-                oracle_results = oracle_runner.execute(run_args, run.vars)
-                aspis_results = aspis_runner.execute(run_args, run.vars)
+                oracle_results = oracle_runner.execute(
+                    run_args, run.vars, run.execution_repetitions
+                )
+                aspis_results = aspis_runner.execute(
+                    run_args, run.vars, run.execution_repetitions
+                )
                 differences = self._measurement_differences(
                     oracle_results, aspis_results
                 )
@@ -523,6 +554,16 @@ class CampaignRun:
     def _measurement_lines(self, oracle_results: dict, aspis_results: dict):
         differences = self._measurement_differences(oracle_results, aspis_results)
         lines = ["measurements:"]
+        lines.append(
+            "  execution_repetitions: "
+            f"oracle={oracle_results.get('execution_repetitions', 1)}, "
+            f"aspis={aspis_results.get('execution_repetitions', 1)}"
+        )
+        lines.append(
+            "  execution_time_standard_error_seconds: "
+            f"oracle={oracle_results.get('execution_time_standard_error_seconds', 0.0)}, "
+            f"aspis={aspis_results.get('execution_time_standard_error_seconds', 0.0)}"
+        )
         for field, unit in (
             ("execution_time_seconds", "s"),
             ("binary_size_bytes", "bytes"),
