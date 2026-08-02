@@ -4,6 +4,7 @@
 			"prorgrams: ["					<PROGRAMS> "]"		NL
 			"data_protection:"				<DATA_PROTECTION>	NL
 			"control_flow_protection:"		<CONTROL_FLOW>		NL
+			["compiler_flags: ["			<COMPILER_FLAGS> "]"	NL]
 			["functions: ["					<FUNCTIONS> "]"		NL] 
 			["vars:["						<VARS> "]"			NL];
 
@@ -13,6 +14,8 @@
 
 <DATA_PROTECTION>	::= "eddi" | "seddi" | "fdsc" | "none";
 <CONTROL_FLOW>	::= "cfcss" | "rasm" | "inter-rasm" | "none";
+<COMPILER_FLAGS> ::= <COMPILER_FLAG> ("," <COMPILER_FLAG>)*;
+<COMPILER_FLAG> ::= any non-whitespace sequence excluding ",", "[" and "]";
 
 <WORD>		::=	(<LETTER> | <NUMBER> | "_")*;
 <LETTER>	::=	  "A" | "B" | "C" | "D" | "E" | "F" | "G"

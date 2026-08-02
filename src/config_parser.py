@@ -25,6 +25,7 @@ class RunnerTest:
     control_flow_protection: ControlFlowMode
     functions: list[str] = field(default_factory=list)
     vars: list[str] = field(default_factory=list)
+    compiler_flags: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,16 @@ class RunnerConfigTransformer(Transformer):
     def word_list(self, items):
         return list(items)
 
+    def COMPILER_FLAG(self, token):
+        return str(token)
+
+    def compiler_flag_list(self, items):
+        return list(items)
+
+    def compiler_flags(self, items):
+        lists = [item for item in items if isinstance(item, list)]
+        return ("compiler_flags", lists[0] if lists else [])
+
     def functions(self, items):
         lists = [item for item in items if isinstance(item, list)]
         return ("functions", lists[0] if lists else [])
@@ -80,6 +91,7 @@ class RunnerConfigTransformer(Transformer):
               programs=values[1],
               data_protection=values[2],
               control_flow_protection=values[3],
+              compiler_flags=optional.get("compiler_flags", []),
               functions=optional.get("functions", []),
               vars=optional.get("vars", []),
           )
