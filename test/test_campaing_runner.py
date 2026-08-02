@@ -75,6 +75,10 @@ class ProgramRunnerTest(unittest.TestCase):
         self.assertEqual(results["stderr"], "err")
         self.assertEqual(results["variables"], {"x": "1"})
         self.assertEqual(results["execution_time_seconds"], 0.25)
+        self.assertEqual(results["execution_time_samples_seconds"], [0.25])
+        self.assertEqual(results["execution_time_stddev_seconds"], 0.0)
+        self.assertEqual(results["execution_time_standard_error_seconds"], 0.0)
+        self.assertEqual(results["execution_repetitions"], 1)
         self.assertEqual(results["binary_size_bytes"], 6)
         self.assertEqual(runner.size, 6)
         self.assertEqual(runner.compiled_sources, [Path(source.name)])
@@ -83,6 +87,48 @@ class ProgramRunnerTest(unittest.TestCase):
         self.assertEqual(run_process.call_args.args[0][1:], ["one", "two"])
         self.assertIsNone(runner._build_dir)
         self.assertFalse(Path(runner.exe).exists())
+
+    @patch(
+        "src.campaing_runner.time.perf_counter",
+        side_effect=[0.0, 1.0, 2.0, 5.0],
+    )
+    @patch("src.campaing_runner.subprocess.run")
+    def test_execute_aggregates_repeated_timing_samples(
+        self, run_process, _perf_counter
+    ):
+        run_process.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="ok", stderr=""
+        )
+        runner = StubRunner()
+        runner._debug_snapshot = Mock(
+            return_value={"variables": {}, "registers": {"rax": "0x0"}}
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".c") as source:
+            runner.compile([source.name])
+            try:
+                results = runner.execute([], [], execution_repetitions=2)
+            finally:
+                runner.cleanup()
+
+        self.assertEqual(results["execution_time_samples_seconds"], [1.0, 3.0])
+        self.assertEqual(results["execution_time_seconds"], 2.0)
+        self.assertAlmostEqual(results["execution_time_stddev_seconds"], 2 ** 0.5)
+        self.assertAlmostEqual(
+            results["execution_time_standard_error_seconds"], 1.0
+        )
+        self.assertEqual(results["execution_repetitions"], 2)
+        self.assertEqual(run_process.call_count, 2)
+
+    def test_execute_rejects_non_positive_repetitions(self):
+        runner = StubRunner()
+        with tempfile.NamedTemporaryFile(suffix=".c") as source:
+            runner.compile([source.name])
+            try:
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    runner.execute(execution_repetitions=0)
+            finally:
+                runner.cleanup()
 
     def test_parses_gdb_and_lldb_snapshot_formats(self):
         runner = StubRunner()
@@ -374,7 +420,13 @@ class AspisRunnerTest(unittest.TestCase):
 
 
 class CampaignRunTest(unittest.TestCase):
-    def _campaign(self, programs=None, variables=None, compiler_flags=None):
+    def _campaign(
+        self,
+        programs=None,
+        variables=None,
+        compiler_flags=None,
+        execution_repetitions=1,
+    ):
         return Campaign(
             runs=[
                 RunnerTest(
@@ -383,6 +435,7 @@ class CampaignRunTest(unittest.TestCase):
                     data_protection=DataProtectionMode.FDSC,
                     control_flow_protection=ControlFlowMode.RASM,
                     compiler_flags=compiler_flags or [],
+                    execution_repetitions=execution_repetitions,
                     vars=variables or ["x"],
                 )
             ]
@@ -409,18 +462,24 @@ class CampaignRunTest(unittest.TestCase):
         aspis_class.return_value.compile.side_effect = (
             lambda programs, flags: order.append("aspis compile")
         )
-        oracle_class.return_value.execute.side_effect = lambda args, variables: (
-            order.append("oracle execute") or oracle_results
+        oracle_class.return_value.execute.side_effect = (
+            lambda args, variables, repetitions: (
+                order.append("oracle execute") or oracle_results
+            )
         )
-        aspis_class.return_value.execute.side_effect = lambda args, variables: (
-            order.append("aspis execute") or aspis_results
+        aspis_class.return_value.execute.side_effect = (
+            lambda args, variables, repetitions: (
+                order.append("aspis execute") or aspis_results
+            )
         )
         environment = Envoirment(aspis_path="/aspis", vanilla_compiler="/clang")
 
         with tempfile.TemporaryDirectory() as directory:
             log_path = Path(directory) / "campaign.log"
             campaign_run = CampaignRun(
-                self._campaign(compiler_flags=["-lm"]),
+                self._campaign(
+                    compiler_flags=["-lm"], execution_repetitions=5
+                ),
                 environment,
                 str(log_path),
                 debugger="gdb",
@@ -433,7 +492,7 @@ class CampaignRunTest(unittest.TestCase):
             ["main.c", "helper.cpp"], ["-lm"]
         )
         oracle_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"]
+            ["a", "b"], ["x"], 5
         )
         aspis_class.assert_called_once_with(
             environment,
@@ -445,7 +504,7 @@ class CampaignRunTest(unittest.TestCase):
             ["main.c", "helper.cpp"], ["-lm"]
         )
         aspis_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"]
+            ["a", "b"], ["x"], 5
         )
         self.assertEqual(
             order,
@@ -453,6 +512,7 @@ class CampaignRunTest(unittest.TestCase):
         )
         self.assertIn("returncode: OK", log)
         self.assertIn("Compiler flags: -lm", log)
+        self.assertIn("Execution repetitions: 5", log)
         self.assertIn("  OK x: oracle=1 aspis=1", log)
         self.assertEqual(
             campaign_run.results[0]["difference"]["binary_size_bytes"],
@@ -491,7 +551,7 @@ class CampaignRunTest(unittest.TestCase):
 
         oracle_class.return_value.compile.assert_called_once_with([str(source)], [])
         oracle_class.return_value.execute.assert_called_once_with(
-            ["first", "second"], ["x"]
+            ["first", "second"], ["x"], 1
         )
 
     def test_skips_run_without_supported_entry_source(self):

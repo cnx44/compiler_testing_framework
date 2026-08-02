@@ -32,6 +32,7 @@ class ParseRunnerConfigTest(unittest.TestCase):
 programs: [main.c, utils.cpp]
 data_protection: eddi
 control_flow_protection: inter-rasm
+execution_repetitions: 25
 compiler_flags: [-lm, -DTRACE=1, -I../include]
 functions: [main, helper]
 vars: [x, y]
@@ -47,6 +48,7 @@ vars: [x, y]
                     programs=["main.c", "utils.cpp"],
                     data_protection=DataProtectionMode.EDDI,
                     control_flow_protection=ControlFlowMode.INTER_RASM,
+                    execution_repetitions=25,
                     compiler_flags=["-lm", "-DTRACE=1", "-I../include"],
                     functions=["main", "helper"],
                     vars=["x", "y"],
@@ -73,6 +75,7 @@ vars: []
         self.assertEqual(campaign.runs[0].functions, [])
         self.assertEqual(campaign.runs[0].vars, [])
         self.assertEqual(campaign.runs[0].compiler_flags, [])
+        self.assertEqual(campaign.runs[0].execution_repetitions, 1)
         self.assertEqual(campaign.runs[1].programs, ["two.cpp", "notes.rs"])
         self.assertIs(
             campaign.runs[0].data_protection,
@@ -114,6 +117,17 @@ vars: []
 programs: [main.py]
 data_protection: eddi
 control_flow_protection: cfcss
+"""
+            )
+
+    def test_rejects_non_positive_execution_repetitions(self):
+        with self.assertRaises(UnexpectedInput):
+            self._parse(
+                """name: broken
+programs: [main.c]
+data_protection: eddi
+control_flow_protection: cfcss
+execution_repetitions: 0
 """
             )
 
