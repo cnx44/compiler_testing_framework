@@ -9,15 +9,24 @@ def continue_and_dump_state():
     
     if src_file and return_line:
         gdb.execute(f"break {src_file}:{return_line}")
-        gdb.execute("continue")
-        
-        gdb.execute('printf "@@ARGS@@\\n"')
-        gdb.execute("info args")
-        
-        gdb.execute('printf "@@LOCALS@@\\n"')
-        gdb.execute("info locals")
-        
-        gdb.execute('printf "@@REGISTERS@@\\n"')
-        gdb.execute("info registers")
+        try:
+            gdb.execute("continue")
+        except gdb.error:
+            pass # Continue to dump state even if it crashes
+            
+        try:
+            gdb.execute('printf "@@ARGS@@\\n"')
+            gdb.execute("info args")
+            
+            gdb.execute('printf "@@LOCALS@@\\n"')
+            gdb.execute("info locals")
+            
+            gdb.execute('printf "@@REGISTERS@@\\n"')
+            gdb.execute("info registers")
+        except gdb.error:
+            pass
     else:
-        gdb.execute("continue")
+        try:
+            gdb.execute("continue")
+        except gdb.error:
+            pass
