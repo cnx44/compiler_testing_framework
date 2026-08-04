@@ -423,27 +423,27 @@ class AspisRunner(ProgramRunner):
 
 
 class CampaignRun:
-    campain: Campaign
+    campaign: Campaign
     log: list[str]
 
     def __init__(
         self,
-        campain: Campaign,
+        campaign: Campaign,
         environment: Envoirment,
-        log_path: str = "CampainRun.log",
+        log_path: str = "CampaignRun.log",
         debugger: str | None = None,
     ):
-        self.campain = campain
+        self.campaign = campaign
         self.environment = environment
         self.log_path = Path(log_path)
         self.debugger = debugger
         self.log = []
         self.results: list[dict] = []
 
-    def run_campaing(self, args: list[str] | None = None):
+    def run_campaign(self, args: list[str] | None = None):
         self.log = []
         self.results = []
-        for run in self.campain.runs:
+        for run in self.campaign.runs:
             self.log.append(f"RUN NAME: {run.name}")
             entry_source = self._entry_source(run.programs)
             if entry_source is None:

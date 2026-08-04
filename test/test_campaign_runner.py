@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from src.campaing_runner import AspisRunner, CampaignRun, OracleRunner, ProgramRunner
+from src.campaign_runner import AspisRunner, CampaignRun, OracleRunner, ProgramRunner
 from src.config_parser import (
     Campaign,
     ControlFlowMode,
@@ -52,8 +52,8 @@ class ProgramRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "missing.c"):
             runner._source_files(["missing.c"])
 
-    @patch("src.campaing_runner.time.perf_counter", side_effect=[10.0, 10.25])
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.time.perf_counter", side_effect=[10.0, 10.25])
+    @patch("src.campaign_runner.subprocess.run")
     def test_run_compiles_executes_collects_snapshot_and_cleans_up(
         self, run_process, _perf_counter
     ):
@@ -89,10 +89,10 @@ class ProgramRunnerTest(unittest.TestCase):
         self.assertFalse(Path(runner.exe).exists())
 
     @patch(
-        "src.campaing_runner.time.perf_counter",
+        "src.campaign_runner.time.perf_counter",
         side_effect=[0.0, 1.0, 2.0, 5.0],
     )
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_execute_aggregates_repeated_timing_samples(
         self, run_process, _perf_counter
     ):
@@ -210,7 +210,7 @@ rax = 0x2
         self.assertEqual(snapshot["registers"], {"rax": "0x2"})
         runner._run_debugger.assert_called_once_with("gdb", 10, [], ["sum"])
 
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_gdb_command_prints_requested_global_variables(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
         runner = StubRunner()
@@ -224,7 +224,7 @@ rax = 0x2
         self.assertIn('printf "sum = "', command)
         self.assertIn("output sum", command)
 
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_lldb_command_prints_requested_global_variables(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
         runner = StubRunner()
@@ -254,7 +254,7 @@ rax = 0x2
 
 
 class OracleRunnerTest(unittest.TestCase):
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_compile_uses_compiler_from_environment_and_all_sources(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
         runner = OracleRunner(Envoirment(vanilla_compiler="/tools/clang"))
@@ -284,7 +284,7 @@ class OracleRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "vanilla_compiler"):
             runner._compile([Path("main.c")])
 
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_compile_exposes_compiler_errors(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 1, "", "bad C")
         runner = OracleRunner(Envoirment(vanilla_compiler="clang"))
@@ -317,7 +317,7 @@ class AspisRunnerTest(unittest.TestCase):
                         [data_flag, control_flag],
                     )
 
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_compile_uses_all_environment_paths_modes_and_sources(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
         with tempfile.TemporaryDirectory() as directory:
@@ -387,7 +387,7 @@ class AspisRunnerTest(unittest.TestCase):
             ],
         )
 
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_compile_omits_llvm_option_when_not_configured(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
         with tempfile.TemporaryDirectory() as directory:
@@ -405,7 +405,7 @@ class AspisRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "aspis_path"):
             runner._compile([Path("main.c")])
 
-    @patch("src.campaing_runner.subprocess.run")
+    @patch("src.campaign_runner.subprocess.run")
     def test_compile_exposes_stdout_and_stderr_on_failure(self, run_process):
         run_process.return_value = subprocess.CompletedProcess(
             [], 1, "ASPIS output", "ASPIS error"
@@ -441,8 +441,8 @@ class CampaignRunTest(unittest.TestCase):
             ]
         )
 
-    @patch("src.campaing_runner.AspisRunner")
-    @patch("src.campaing_runner.OracleRunner")
+    @patch("src.campaign_runner.AspisRunner")
+    @patch("src.campaign_runner.OracleRunner")
     def test_runs_both_variants_with_same_programs_and_arguments(
         self, oracle_class, aspis_class
     ):
@@ -484,7 +484,7 @@ class CampaignRunTest(unittest.TestCase):
                 str(log_path),
                 debugger="gdb",
             )
-            log = campaign_run.run_campaing(["a", "b"])
+            log = campaign_run.run_campaign(["a", "b"])
             written_log = log_path.read_text(encoding="utf-8")
 
         oracle_class.assert_called_once_with(environment, "gdb")
@@ -520,8 +520,8 @@ class CampaignRunTest(unittest.TestCase):
         )
         self.assertEqual(written_log, "\n".join(log))
 
-    @patch("src.campaing_runner.AspisRunner")
-    @patch("src.campaing_runner.OracleRunner")
+    @patch("src.campaign_runner.AspisRunner")
+    @patch("src.campaign_runner.OracleRunner")
     def test_reads_arguments_from_values_file(self, oracle_class, aspis_class):
         results = {
             "returncode": 0,
@@ -547,7 +547,7 @@ class CampaignRunTest(unittest.TestCase):
                 Envoirment(),
                 str(log_path),
             )
-            campaign_run.run_campaing()
+            campaign_run.run_campaign()
 
         oracle_class.return_value.compile.assert_called_once_with([str(source)], [])
         oracle_class.return_value.execute.assert_called_once_with(
@@ -561,10 +561,10 @@ class CampaignRunTest(unittest.TestCase):
                 Envoirment(),
                 str(Path(directory) / "campaign.log"),
             )
-            log = runner.run_campaing()
+            log = runner.run_campaign()
         self.assertIn("No C or C++ source file found.", log)
 
-    @patch("src.campaing_runner.OracleRunner")
+    @patch("src.campaign_runner.OracleRunner")
     def test_records_runner_errors_and_continues(self, oracle_class):
         oracle_class.return_value.compile.side_effect = RuntimeError("compiler down")
         with tempfile.TemporaryDirectory() as directory:
@@ -573,7 +573,7 @@ class CampaignRunTest(unittest.TestCase):
                 Envoirment(),
                 str(Path(directory) / "campaign.log"),
             )
-            log = runner.run_campaing([])
+            log = runner.run_campaign([])
         self.assertIn("ERROR: compiler down", log)
 
     def test_comparison_marks_differences_and_missing_variables(self):
