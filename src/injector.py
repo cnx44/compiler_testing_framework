@@ -7,7 +7,7 @@ from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
 class BaseInjector(ABC):
 
-    def __init__(self, target_bin: str, target_src: str, target_func: str):
+    def __init__(self, target_bin: str, target_src: str, target_func: str = "main"):
         self.target_bin = target_bin
         self.target_src = target_src
         self.target_func = target_func
@@ -151,7 +151,7 @@ class BaseInjector(ABC):
 
 
 class RegisterInjector(BaseInjector):
-    def __init__(self, target_bin: str, target_src: str, target_func: str, data_only: bool = False):
+    def __init__(self, target_bin: str, target_src: str, target_func: str = "main", data_only: bool = False):
         super().__init__(target_bin, target_src, target_func)
         self.data_only = data_only
 
@@ -173,14 +173,12 @@ class RegisterInjector(BaseInjector):
 
 
 class MemoryInjector(BaseInjector):
-    def __init__(self, target_bin: str, target_src: str, target_func: str, 
-                 payload_ptr: str = "", length_var: str = "", 
-                 data_type_size: str = "4", data_only: bool = False):
+    def __init__(self, target_bin: str, target_src: str, target_func: str = "main", 
+                 payload_ptr: str = "", length_var: str = ""):
         super().__init__(target_bin, target_src, target_func)
         self.payload_ptr = payload_ptr
         self.length_var = length_var
-        self.data_type_size = data_type_size
-        self.data_only = data_only
+        self.data_only = bool(payload_ptr)
 
     @property
     def gdb_script(self) -> str:
@@ -196,7 +194,6 @@ class MemoryInjector(BaseInjector):
             "MAX_STEPS"         : profile_data["MAX_STEPS"],
             "PAYLOAD_PTR"       : self.payload_ptr,
             "LENGTH_VAR"        : self.length_var,
-            "DATA_TYPE_SIZE"    : self.data_type_size,
             "DATA_ONLY_MODE"    : "1" if self.data_only else "0"
         }
 

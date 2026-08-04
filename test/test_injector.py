@@ -204,8 +204,6 @@ class InjectorImplementationsTest(unittest.TestCase):
             "work",
             payload_ptr="buffer",
             length_var="size",
-            data_type_size="8",
-            data_only=True,
         )
         injector.profile_target = Mock(return_value={"MAX_STEPS": "12"})
         self.assertEqual(
@@ -215,7 +213,6 @@ class InjectorImplementationsTest(unittest.TestCase):
                 "MAX_STEPS": "12",
                 "PAYLOAD_PTR": "buffer",
                 "LENGTH_VAR": "size",
-                "DATA_TYPE_SIZE": "8",
                 "DATA_ONLY_MODE": "1",
             },
         )
