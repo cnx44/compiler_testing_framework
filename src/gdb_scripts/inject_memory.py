@@ -5,7 +5,7 @@ import sys
 
 # Tell GDB's Python interpreter to look in the current folder for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from gdb_utils import continue_and_dump_state
+from gdb_utils import continue_and_dump_state, get_arch_config
 
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
@@ -72,8 +72,10 @@ def inject_diagnostic_memory():
                     raise ValueError("DWARF pointer points to unmapped/garbage memory.")
                     
             except Exception as e:
-                print(f"[DIAG] DWARF corrupted ({e}). Reading Arg 1 directly from $rdi register.")
-                base_addr = int(gdb.parse_and_eval("(unsigned long long)$rdi"))
+                arch_config = get_arch_config()
+                arg1_reg = arch_config["arg1_reg"]
+                print(f"[DIAG] DWARF corrupted ({e}). Reading Arg 1 directly from ${arg1_reg} register.")
+                base_addr = int(gdb.parse_and_eval(f"(unsigned long long)${arg1_reg}"))
                 
             print(f"[DIAG] Base address found: {hex(base_addr)}")
             
@@ -88,8 +90,10 @@ def inject_diagnostic_memory():
                     if max_elements > 1000000 or max_elements < 0:
                         raise ValueError("Corrupted DWARF length detected.")
                 except Exception as e:
-                    print(f"[DIAG] DWARF corrupted ({e}). Reading Arg 3 directly from $rdx register.")
-                    max_elements = int(gdb.parse_and_eval("(unsigned long long)$rdx"))
+                    arch_config = get_arch_config()
+                    arg3_reg = arch_config["arg3_reg"]
+                    print(f"[DIAG] DWARF corrupted ({e}). Reading Arg 3 directly from ${arg3_reg} register.")
+                    max_elements = int(gdb.parse_and_eval(f"(unsigned long long)${arg3_reg}"))
             else:
                 try:
                     if type_code == gdb.TYPE_CODE_ARRAY:
@@ -129,9 +133,9 @@ def inject_diagnostic_memory():
     # --- Strategy: Safe Stack Bounds (Fallback) ---
     if target_address is None:
         try:
-            rsp_val = int(gdb.parse_and_eval("(unsigned long long)$rsp"))
-            rbp_val = int(gdb.parse_and_eval("(unsigned long long)$rbp"))
-            print(f"[DIAG] Fallback triggered. Stack bounds: RSP={hex(rsp_val)}, RBP={hex(rbp_val)}")
+            rsp_val = int(gdb.parse_and_eval("(unsigned long long)$sp"))
+            rbp_val = int(gdb.parse_and_eval("(unsigned long long)$fp"))
+            print(f"[DIAG] Fallback triggered. Stack bounds: SP={hex(rsp_val)}, FP={hex(rbp_val)}")
             
             if rbp_val > rsp_val + 8:
                 valid_offsets = list(range(0, (rbp_val - rsp_val) - 4, 4))

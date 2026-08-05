@@ -22,6 +22,8 @@ class TestGdbUtils(unittest.TestCase):
     def setUp(self):
         gdb_mock.reset_mock()
         gdb_mock.execute.side_effect = None
+        gdb_mock.selected_frame.side_effect = None
+        gdb_mock.selected_frame.return_value = MagicMock()
 
     @patch('os.environ.get')
     def test_continue_and_dump_state_handles_crash(self, mock_env_get):
@@ -58,6 +60,37 @@ class TestGdbUtils(unittest.TestCase):
         # Verify it still dumps state
         gdb_mock.execute.assert_any_call('printf "@@ARGS@@\\n"')
         gdb_mock.execute.assert_any_call('info registers')
+
+    def test_get_arch_config_x86_64(self):
+        mock_arch = MagicMock()
+        mock_arch.name.return_value = "i386:x86-64"
+        mock_frame = MagicMock()
+        mock_frame.architecture.return_value = mock_arch
+        gdb_mock.selected_frame.return_value = mock_frame
+        
+        config = gdb_utils.get_arch_config()
+        self.assertEqual(config["arg1_reg"], "rdi")
+        self.assertEqual(config["arg3_reg"], "rdx")
+        self.assertIn("rsp", config["pointer_blacklist"])
+
+    def test_get_arch_config_aarch64(self):
+        mock_arch = MagicMock()
+        mock_arch.name.return_value = "aarch64"
+        mock_frame = MagicMock()
+        mock_frame.architecture.return_value = mock_arch
+        gdb_mock.selected_frame.return_value = mock_frame
+        
+        config = gdb_utils.get_arch_config()
+        self.assertEqual(config["arg1_reg"], "x0")
+        self.assertEqual(config["arg3_reg"], "x2")
+        self.assertIn("x29", config["pointer_blacklist"])
+
+    def test_get_arch_config_no_frame(self):
+        gdb_mock.selected_frame.side_effect = gdb_mock.error("No stack.")
+        
+        config = gdb_utils.get_arch_config()
+        self.assertEqual(config["arg1_reg"], "rdi")
+        self.assertEqual(config["arg3_reg"], "rdx")
 
 if __name__ == '__main__':
     unittest.main()

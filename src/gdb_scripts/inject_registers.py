@@ -5,7 +5,7 @@ import sys
 
 # Tell GDB's Python interpreter to look in the current folder for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from gdb_utils import continue_and_dump_state
+from gdb_utils import continue_and_dump_state, get_arch_config
 
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
@@ -13,13 +13,11 @@ gdb.execute("set verbose off")
 
 def get_max_bit(reg):
     # Dynamically returns the maximum bit index based on the register's architectural size.
-    if reg in ["al", "ah", "bl", "bh", "cl", "ch", "dl", "dh", "sil", "dil", "bpl", "spl"] or (reg.startswith("r") and reg.endswith("b")):
-        return 7
-    elif reg in ["ax", "bx", "cx", "dx", "si", "di", "bp", "sp"] or (reg.startswith("r") and reg.endswith("w")):
-        return 15
-    elif reg.startswith("e") or (reg.startswith("r") and reg.endswith("d")):
-        return 31
-    else:
+    try:
+        reg_size_bytes = gdb.parse_and_eval(f"${reg}").type.sizeof
+        return (reg_size_bytes * 8) - 1
+    except gdb.error:
+        # Fallback just in case
         return 63
 
 def inject_smart_register():
@@ -54,17 +52,13 @@ def inject_smart_register():
 
         # Apply the Data-Only filter if the flag was passed in Bash
         if data_only_mode == "1":
-            pointer_blacklist = {
-                "rsp", "esp", "sp", "spl",
-                "rbp", "ebp", "bp", "bpl",
-                "rdi", "edi", "di", "dil",
-                "rsi", "esi", "si", "sil"
-            }
+            arch_config = get_arch_config()
+            pointer_blacklist = arch_config["pointer_blacklist"]
             safe_regs = [reg for reg in profiled_regs if reg not in pointer_blacklist]
             
             # Fallback in the rare case the compiler only used pointers
             if not safe_regs:
-                safe_regs = ["eax", "edx", "ecx"]
+                safe_regs = arch_config["safe_regs_fallback"]
             target = random.choice(safe_regs)
         else:
             # Use the full list, including pointers
