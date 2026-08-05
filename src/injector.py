@@ -44,28 +44,17 @@ class BaseInjector(ABC):
                 
         return profile_data
 
-    def _main_return_line(self) -> int:
-        """Finds the line number of the return statement in the source file."""
-        lines = Path(self.target_src).read_text(encoding="utf-8").splitlines()
-        for index, line in reversed(list(enumerate(lines, start=1))):
-            if "return" in line:
-                return index
-        raise RuntimeError("main return line not found")
-
     def run(self, args: list[str] | None = None) -> ExecutionResult:
         """Executes a single injection and extracts the final execution state."""
         args = args or []
         run_env = os.environ.copy()
         run_env.update(self.setup())
         
-        return_line = self._main_return_line()
         inferior_out = Path(".inferior_out.txt")
         if inferior_out.exists():
             inferior_out.unlink()
 
-        # Export routing variables so the GDB script knows where to stop and dump state
-        run_env["RETURN_LINE"] = str(return_line)
-        run_env["SRC_FILE"] = Path(self.target_src).name
+        run_env["ENTRY_FUNC"] = self.target_func
 
         command = [
             "gdb", "--batch", "-q",

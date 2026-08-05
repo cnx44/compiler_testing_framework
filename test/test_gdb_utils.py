@@ -28,7 +28,7 @@ class TestGdbUtils(unittest.TestCase):
     @patch('os.environ.get')
     def test_continue_and_dump_state_handles_crash(self, mock_env_get):
         # Simulate environment variables set by the injector
-        env_vars = {"SRC_FILE": "main.c", "RETURN_LINE": "42"}
+        env_vars = {"ENTRY_FUNC": "main"}
         mock_env_get.side_effect = lambda k, default=None: env_vars.get(k, default)
         
         # Simulate a crash during 'continue' by raising gdb.error
@@ -37,6 +37,18 @@ class TestGdbUtils(unittest.TestCase):
                 raise gdb_mock.error("Program received signal SIGSEGV, Segmentation fault.")
         
         gdb_mock.execute.side_effect = mock_execute
+        gdb_mock.parse_and_eval.return_value = 0x1000
+        mock_block = MagicMock()
+        mock_block.start = 0x1000
+        mock_block.end = 0x1050
+        gdb_mock.block_for_pc.return_value = mock_block
+        
+        mock_sym = MagicMock()
+        mock_entry = MagicMock()
+        mock_entry.pc = 0x1020
+        mock_entry.line = 42
+        mock_sym.symtab.linetable.return_value = [mock_entry]
+        gdb_mock.lookup_symbol.return_value = (mock_sym, None)
         
         # This should NOT raise an exception because gdb_utils catches gdb.error
         gdb_utils.continue_and_dump_state()
@@ -51,8 +63,21 @@ class TestGdbUtils(unittest.TestCase):
 
     @patch('os.environ.get')
     def test_continue_and_dump_state_normal_execution(self, mock_env_get):
-        env_vars = {"SRC_FILE": "main.c", "RETURN_LINE": "42"}
+        env_vars = {"ENTRY_FUNC": "main"}
         mock_env_get.side_effect = lambda k, default=None: env_vars.get(k, default)
+        
+        gdb_mock.parse_and_eval.return_value = 0x1000
+        mock_block = MagicMock()
+        mock_block.start = 0x1000
+        mock_block.end = 0x1050
+        gdb_mock.block_for_pc.return_value = mock_block
+        
+        mock_sym = MagicMock()
+        mock_entry = MagicMock()
+        mock_entry.pc = 0x1020
+        mock_entry.line = 42
+        mock_sym.symtab.linetable.return_value = [mock_entry]
+        gdb_mock.lookup_symbol.return_value = (mock_sym, None)
         
         # No exception is raised
         gdb_utils.continue_and_dump_state()

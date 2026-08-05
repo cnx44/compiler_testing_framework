@@ -44,22 +44,7 @@ class BaseInjectorTest(unittest.TestCase):
         self.assertEqual(command[-2:], ["--args", "/tmp/program"])
         self.assertEqual(run_process.call_args.kwargs["env"]["TARGET_FUNC"], "target")
 
-    def test_main_return_line_uses_last_return(self):
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".c", encoding="utf-8"
-        ) as source:
-            source.write("int helper() { return 1; }\nint main() {\nreturn 0;\n}\n")
-            source.flush()
-            self.assertEqual(self._injector(source.name)._main_return_line(), 3)
 
-    def test_main_return_line_requires_return_statement(self):
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".c", encoding="utf-8"
-        ) as source:
-            source.write("int main() {}\n")
-            source.flush()
-            with self.assertRaisesRegex(RuntimeError, "return line"):
-                self._injector(source.name)._main_return_line()
 
     def test_extract_state_parses_output_and_inferior_stdout(self):
         output = """@@ARGS@@
@@ -167,8 +152,7 @@ rax 0x4
                 "two",
             ],
         )
-        self.assertEqual(call_args.kwargs["env"]["RETURN_LINE"], "2")
-        self.assertEqual(call_args.kwargs["env"]["SRC_FILE"], "main.c")
+        self.assertEqual(call_args.kwargs["env"]["ENTRY_FUNC"], "main")
         self.assertEqual(call_args.kwargs["timeout"], 5)
 
 

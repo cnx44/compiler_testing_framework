@@ -3,33 +3,50 @@ import gdb
 import os
 
 def continue_and_dump_state():
-    """Continues execution to the return line and dumps the state."""
-    src_file = os.environ.get("SRC_FILE")
-    return_line = os.environ.get("RETURN_LINE")
+    """Continues execution to the end of main and dumps the state."""
+    entry_func = os.environ.get("ENTRY_FUNC", "main")
     
-    if src_file and return_line:
-        gdb.execute(f"break {src_file}:{return_line}")
-        try:
-            gdb.execute("continue")
-        except gdb.error:
-            pass # Continue to dump state even if it crashes
+    try:
+        # Get the start address of the entry function
+        func_addr = int(gdb.parse_and_eval(f"&{entry_func}"))
+        block = gdb.block_for_pc(func_addr)
+        
+        if block:
+            start_pc = block.start
+            end_pc = block.end
             
-        try:
-            gdb.execute('printf "@@ARGS@@\\n"')
-            gdb.execute("info args")
+            # Find the symbol to access the line table
+            sym, _ = gdb.lookup_symbol(entry_func)
             
-            gdb.execute('printf "@@LOCALS@@\\n"')
-            gdb.execute("info locals")
+            lines = set()
+            if sym and sym.symtab:
+                for entry in sym.symtab.linetable():
+                    if start_pc <= entry.pc < end_pc:
+                        lines.add(entry.line)
             
-            gdb.execute('printf "@@REGISTERS@@\\n"')
-            gdb.execute("info registers")
-        except gdb.error:
-            pass
-    else:
-        try:
-            gdb.execute("continue")
-        except gdb.error:
-            pass
+            if lines:
+                max_line = max(lines)
+                gdb.execute(f"break {max_line}")
+    except Exception:
+        # Fallback if symbols or debug info are missing
+        pass
+
+    try:
+        gdb.execute("continue")
+    except gdb.error:
+        pass # Continue to dump state even if it crashes
+        
+    try:
+        gdb.execute('printf "@@ARGS@@\\n"')
+        gdb.execute("info args")
+        
+        gdb.execute('printf "@@LOCALS@@\\n"')
+        gdb.execute("info locals")
+        
+        gdb.execute('printf "@@REGISTERS@@\\n"')
+        gdb.execute("info registers")
+    except gdb.error:
+        pass
 
 def get_arch_config():
     """Returns architecture-specific configuration for edge cases."""
