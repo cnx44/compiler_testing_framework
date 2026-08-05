@@ -282,11 +282,24 @@ class ProgramRunner(ABC):
             self._build_dir = None
 
     def _main_return_line(self):
-        lines = Path(self.src).read_text(encoding="utf-8").splitlines()
-        for index, line in reversed(list(enumerate(lines, start=1))):
-            if "return" in line:
-                return index
-        raise RuntimeError("main return line not found")
+        gdb_scripts_dir = str(Path(__file__).parent.resolve() / "gdb_scripts")
+        script = (
+            f"python import sys; sys.path.append('{gdb_scripts_dir}'); "
+            "import gdb_utils; "
+            "print('MAX_LINE=' + str(gdb_utils.get_end_line('main')))"
+        )
+        result = subprocess.run(
+            ["gdb", "--batch", "-q", self.exe, "-ex", script],
+            capture_output=True,
+            text=True,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("MAX_LINE="):
+                max_line = int(line.split("=", 1)[1])
+                if max_line != -1:
+                    return max_line
+                break
+        raise RuntimeError(f"Could not determine main return line via GDB DWARF symbols.\n{result.stderr}")
 
 
 class OracleRunner(ProgramRunner):

@@ -2,34 +2,35 @@
 import gdb
 import os
 
-def continue_and_dump_state():
-    """Continues execution to the end of main and dumps the state."""
-    entry_func = os.environ.get("ENTRY_FUNC", "main")
-    
+def get_end_line(entry_func="main"):
+    """Returns the maximum line number belonging to the entry function using DWARF line tables."""
     try:
-        # Get the start address of the entry function
         func_addr = int(gdb.parse_and_eval(f"&{entry_func}"))
         block = gdb.block_for_pc(func_addr)
-        
         if block:
             start_pc = block.start
             end_pc = block.end
-            
-            # Find the symbol to access the line table
             sym, _ = gdb.lookup_symbol(entry_func)
-            
             lines = set()
             if sym and sym.symtab:
                 for entry in sym.symtab.linetable():
                     if start_pc <= entry.pc < end_pc:
                         lines.add(entry.line)
-            
             if lines:
-                max_line = max(lines)
-                gdb.execute(f"break {max_line}")
+                return max(lines)
     except Exception:
-        # Fallback if symbols or debug info are missing
         pass
+    return -1
+
+def continue_and_dump_state():
+    """Continues execution to the end of main and dumps the state."""
+    entry_func = os.environ.get("ENTRY_FUNC", "main")
+    max_line = get_end_line(entry_func)
+    if max_line != -1:
+        try:
+            gdb.execute(f"break {max_line}")
+        except Exception:
+            pass
 
     try:
         gdb.execute("continue")
