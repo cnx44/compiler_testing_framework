@@ -1,5 +1,7 @@
 import os
+import platform
 import re
+import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
@@ -9,11 +11,20 @@ from src.env import Environment
 
 class BaseInjector(ABC):
 
-    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main"):
+    def __init__(
+        self,
+        env: Environment,
+        target_bin: str | Path,
+        target_src: str | Path,
+        target_func: str = "main",
+        debugger: str | None = None,
+    ):
         self.env = env
         self.target_bin = Path(target_bin).resolve()
         self.target_src = Path(target_src).resolve()
         self.target_func = target_func
+        self.debugger = debugger
+        self._selected_debugger: str | None = None
         self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
 
     @abstractmethod
@@ -27,25 +38,108 @@ class BaseInjector(ABC):
         """Returns the specific GDB Python script path to execute."""
         pass
 
+    @property
+    @abstractmethod
+    def lldb_script(self) -> str:
+        """Returns the specific LLDB Python script path to execute."""
+        pass
+
+    def _debuggers(self) -> list[str]:
+        if self.debugger is not None:
+            candidates = [self.debugger]
+        elif platform.system() == "Darwin":
+            candidates = [self.env.lldb_executable, self.env.gdb_executable]
+        else:
+            candidates = [self.env.gdb_executable, self.env.lldb_executable]
+
+        available = []
+        for debugger in candidates:
+            if debugger and shutil.which(str(debugger)) and debugger not in available:
+                available.append(str(debugger))
+        return available
+
+    def _debugger_flavor(self, debugger: str) -> str:
+        name = Path(debugger).name.lower()
+        if "gdb" in name:
+            return "gdb"
+        if "lldb" in name:
+            return "lldb"
+        raise ValueError(f"Unsupported debugger: {debugger}")
+
+    def _script_for(self, debugger: str) -> str:
+        return self.gdb_script if self._debugger_flavor(debugger) == "gdb" else self.lldb_script
+
+    def _debugger_command(
+        self,
+        debugger: str,
+        script: str,
+        args: list[str] | None = None,
+    ) -> list[str | Path]:
+        args = args or []
+        if self._debugger_flavor(debugger) == "gdb":
+            return [
+                debugger, "--batch", "-q", "-x", script,
+                "--args", self.target_bin, *args,
+            ]
+        return [
+            debugger, "--batch", "--no-lldbinit",
+            "-o", f"command script import {script}",
+            "--", self.target_bin, *args,
+        ]
+
+    def _ordered_debuggers(self) -> list[str]:
+        debuggers = self._debuggers()
+        if self._selected_debugger in debuggers:
+            debuggers.remove(self._selected_debugger)
+            debuggers.insert(0, self._selected_debugger)
+        return debuggers
+
+    def _debugger_failed_to_start(self, process: subprocess.CompletedProcess) -> bool:
+        output = f"{process.stdout}\n{process.stderr}"
+        startup_errors = (
+            "Don't know how to run",
+            "unable to launch the executable",
+            "process exited with status -1",
+            "error: process launch failed",
+        )
+        return process.returncode != 0 or any(error.lower() in output.lower() for error in startup_errors)
+
     def profile_target(self) -> dict:
         """Runs the profiling script and extracts steps and valid registers."""
         env = os.environ.copy()
         env["TARGET_FUNC"] = self.target_func
-        profile_script = self.base_dir / "profile_target.py"
-        
-        result = subprocess.run(
-            [self.env.gdb_executable, "-batch", "-q", "-x", str(profile_script), "--args", self.target_bin],
-            capture_output=True, text=True, env=env
-        )
-        
-        profile_data = {}
-        for line in result.stdout.splitlines():
-            if line.startswith("PROFILED_STEPS="):
-                profile_data["MAX_STEPS"] = line.split("=")[1]
-            elif line.startswith("PROFILED_REGS="):
-                profile_data["TARGET_REGS"] = line.split("=")[1]
-                
-        return profile_data
+        env["INFERIOR_OUT"] = os.devnull
+        errors = []
+        for debugger in self._ordered_debuggers():
+            profile_script = self.base_dir / (
+                "profile_target.py"
+                if self._debugger_flavor(debugger) == "gdb"
+                else "profile_target_lldb.py"
+            )
+            result = subprocess.run(
+                self._debugger_command(debugger, str(profile_script)),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            profile_data = {}
+            for line in result.stdout.splitlines():
+                if line.startswith("PROFILED_STEPS="):
+                    profile_data["MAX_STEPS"] = line.split("=", 1)[1]
+                elif line.startswith("PROFILED_REGS="):
+                    profile_data["TARGET_REGS"] = line.split("=", 1)[1]
+
+            if (
+                not self._debugger_failed_to_start(result)
+                and profile_data.get("MAX_STEPS", "").isdigit()
+            ):
+                self._selected_debugger = debugger
+                return profile_data
+            errors.append(f"{debugger}: {result.stderr.strip() or result.stdout.strip()}")
+
+        details = "\n".join(errors) or "Neither gdb nor lldb is installed."
+        raise RuntimeError(f"Target profiling failed:\n{details}")
 
     def run(self, args: list[str] | None = None) -> ExecutionResult:
         """Executes a single injection and extracts the final execution state."""
@@ -59,22 +153,43 @@ class BaseInjector(ABC):
         run_env["INFERIOR_OUT"] = str(inferior_out)
         run_env["ENTRY_FUNC"] = self.target_func
 
-        command = [
-            self.env.gdb_executable, "--batch", "-q",
-            "-x", self.gdb_script,
-            "--args", self.target_bin, *args
-        ]
+        debuggers = self._ordered_debuggers()
+        if not debuggers:
+            inferior_out.unlink(missing_ok=True)
+            raise RuntimeError("Neither gdb nor lldb is installed.")
 
-        try:
-            # Using timeout to catch infinite loops caused by corrupted jumps
-            process = subprocess.run(command, capture_output=True, text=True, env=run_env, timeout=5)
-            exit_code = process.returncode
-            stdout = process.stdout
-            stderr = process.stderr
-        except subprocess.TimeoutExpired as e:
-            exit_code = 124
-            stdout = e.stdout.decode() if e.stdout else ""
-            stderr = e.stderr.decode() if e.stderr else ""
+        errors = []
+        for index, debugger in enumerate(debuggers):
+            command = self._debugger_command(
+                debugger, self._script_for(debugger), args
+            )
+            try:
+                # Using timeout to catch infinite loops caused by corrupted jumps
+                process = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    env=run_env,
+                    timeout=5,
+                )
+                exit_code = process.returncode
+                stdout = process.stdout
+                stderr = process.stderr
+            except subprocess.TimeoutExpired as error:
+                exit_code = 124
+                stdout = self._decode_timeout_output(error.stdout)
+                stderr = self._decode_timeout_output(error.stderr)
+                break
+
+            if self._debugger_failed_to_start(process) and index + 1 < len(debuggers):
+                errors.append(f"{debugger}: {stderr.strip() or stdout.strip()}")
+                inferior_out.write_text("", encoding="utf-8")
+                continue
+            self._selected_debugger = debugger
+            break
+        else:
+            inferior_out.unlink(missing_ok=True)
+            raise RuntimeError("Debugger execution failed:\n" + "\n".join(errors))
 
         # Determine the event type based on GDB output and exit code
         event = TerminationEvent.RETURNED
@@ -86,7 +201,11 @@ class BaseInjector(ABC):
             event = TerminationEvent.ASPIS_DATA
         elif "Control-flow signature mismatch" in combined_out:
             event = TerminationEvent.ASPIS_CF
-        elif "Program received signal" in combined_out or "Program terminated with signal" in combined_out:
+        elif (
+            "Program received signal" in combined_out
+            or "Program terminated with signal" in combined_out
+            or "stop reason = signal" in combined_out
+        ):
             event = TerminationEvent.CRASHED
 
         # Extract the internal state
@@ -96,6 +215,11 @@ class BaseInjector(ABC):
             inferior_out.unlink()
             
         return ExecutionResult(event=event, state=state)
+
+    def _decode_timeout_output(self, output: str | bytes | None) -> str:
+        if output is None:
+            return ""
+        return output.decode() if isinstance(output, bytes) else output
 
     def _extract_state(self, stdout: str, stderr: str, inferior_out: Path) -> ExecutionState:
         """Parses the GDB output to extract variables and registers into a typed state."""
@@ -146,13 +270,17 @@ class BaseInjector(ABC):
 
 
 class RegisterInjector(BaseInjector):
-    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False):
-        super().__init__(env, target_bin, target_src, target_func)
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False, debugger: str | None = None):
+        super().__init__(env, target_bin, target_src, target_func, debugger)
         self.data_only = data_only
 
     @property
     def gdb_script(self) -> str:
         return str(self.base_dir / "inject_registers.py")
+
+    @property
+    def lldb_script(self) -> str:
+        return str(self.base_dir / "inject_registers_lldb.py")
 
     def setup(self) -> dict:
         profile_data = self.profile_target()
@@ -169,8 +297,8 @@ class RegisterInjector(BaseInjector):
 
 class MemoryInjector(BaseInjector):
     def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
-                 payload_ptr: str = "", length_var: str = ""):
-        super().__init__(env, target_bin, target_src, target_func)
+                 payload_ptr: str = "", length_var: str = "", debugger: str | None = None):
+        super().__init__(env, target_bin, target_src, target_func, debugger)
         self.payload_ptr = payload_ptr
         self.length_var = length_var
         self.data_only = bool(payload_ptr)
@@ -178,6 +306,10 @@ class MemoryInjector(BaseInjector):
     @property
     def gdb_script(self) -> str:
         return str(self.base_dir / "inject_memory.py")
+
+    @property
+    def lldb_script(self) -> str:
+        return str(self.base_dir / "inject_memory_lldb.py")
 
     def setup(self) -> dict:
         profile_data = self.profile_target()
@@ -199,6 +331,10 @@ class NormalExecution(BaseInjector):
     @property
     def gdb_script(self) -> str:
         return str(self.base_dir / "extract_baseline_state.py")
+
+    @property
+    def lldb_script(self) -> str:
+        return str(self.base_dir / "extract_baseline_state_lldb.py")
 
     def setup(self) -> dict:
         return {}

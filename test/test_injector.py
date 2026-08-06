@@ -18,7 +18,9 @@ from src.env import Environment
 
 class BaseInjectorTest(unittest.TestCase):
     def _injector(self, source: str):
-        return NormalExecution(Environment(), "/tmp/program", source, "main")
+        return NormalExecution(
+            Environment(), "/tmp/program", source, "main", debugger="gdb"
+        )
 
     def test_is_abstract(self):
         with self.assertRaises(TypeError):
@@ -32,7 +34,9 @@ class BaseInjectorTest(unittest.TestCase):
             "noise\nPROFILED_STEPS=42\nPROFILED_REGS=rax,rbx\n",
             "",
         )
-        injector = NormalExecution(Environment(), "/tmp/program", "/tmp/main.c", "target")
+        injector = NormalExecution(
+            Environment(), "/tmp/program", "/tmp/main.c", "target", debugger="gdb"
+        )
 
         profile = injector.profile_target()
 
@@ -41,18 +45,45 @@ class BaseInjectorTest(unittest.TestCase):
             {"MAX_STEPS": "42", "TARGET_REGS": "rax,rbx"},
         )
         command = run_process.call_args.args[0]
-        self.assertEqual(command[:5], ["gdb", "-batch", "-q", "-x", str(injector.base_dir / "profile_target.py")])
+        self.assertEqual(command[:5], ["gdb", "--batch", "-q", "-x", str(injector.base_dir / "profile_target.py")])
         self.assertEqual(command[-2:], ["--args", injector.target_bin])
         self.assertEqual(run_process.call_args.kwargs["env"]["TARGET_FUNC"], "target")
 
+    @patch("src.injector.shutil.which", side_effect=lambda executable: executable)
     @patch("src.injector.subprocess.run")
-    def test_injector_respects_custom_debugger_path(self, run_process):
+    def test_injector_respects_custom_debugger_path(self, run_process, _which):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
         env = Environment(gdb_executable="/opt/custom/gdb")
-        injector = NormalExecution(env, "/tmp/program", "/tmp/main.c", "target")
+        injector = NormalExecution(
+            env,
+            "/tmp/program",
+            "/tmp/main.c",
+            "target",
+            debugger=env.gdb_executable,
+        )
         injector.run()
         command = run_process.call_args.args[0]
         self.assertEqual(command[0], "/opt/custom/gdb")
+
+    @patch("src.injector.platform.system", return_value="Darwin")
+    @patch(
+        "src.injector.shutil.which",
+        side_effect=lambda executable: executable if executable == "lldb" else None,
+    )
+    def test_automatically_selects_installed_debugger(self, _which, _system):
+        injector = NormalExecution(Environment(), "/tmp/program", "/tmp/main.c")
+        self.assertEqual(injector._debuggers(), ["lldb"])
+
+    def test_builds_lldb_command_with_matching_script(self):
+        injector = NormalExecution(
+            Environment(), "/tmp/program", "/tmp/main.c", debugger="lldb"
+        )
+        command = injector._debugger_command(
+            "lldb", injector.lldb_script, ["one"]
+        )
+        self.assertEqual(command[0:3], ["lldb", "--batch", "--no-lldbinit"])
+        self.assertIn("extract_baseline_state_lldb.py", command[4])
+        self.assertEqual(command[-3:], ["--", injector.target_bin, "one"])
 
 
 
@@ -182,6 +213,9 @@ class InjectorImplementationsTest(unittest.TestCase):
             },
         )
         self.assertTrue(injector.gdb_script.endswith("gdb_scripts/inject_registers.py"))
+        self.assertTrue(
+            injector.lldb_script.endswith("gdb_scripts/inject_registers_lldb.py")
+        )
 
     def test_register_injector_requires_complete_profile(self):
         injector = RegisterInjector(Environment(), "program", "main.c", "work")
@@ -212,6 +246,9 @@ class InjectorImplementationsTest(unittest.TestCase):
             },
         )
         self.assertTrue(injector.gdb_script.endswith("gdb_scripts/inject_memory.py"))
+        self.assertTrue(
+            injector.lldb_script.endswith("gdb_scripts/inject_memory_lldb.py")
+        )
 
     def test_memory_injector_requires_profiled_steps(self):
         injector = MemoryInjector(Environment(), "program", "main.c", "work")
@@ -224,6 +261,11 @@ class InjectorImplementationsTest(unittest.TestCase):
         self.assertEqual(injector.setup(), {})
         self.assertTrue(
             injector.gdb_script.endswith("gdb_scripts/extract_baseline_state.py")
+        )
+        self.assertTrue(
+            injector.lldb_script.endswith(
+                "gdb_scripts/extract_baseline_state_lldb.py"
+            )
         )
 
 

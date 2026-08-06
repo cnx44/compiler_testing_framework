@@ -351,7 +351,7 @@ class AspisRunnerTest(unittest.TestCase):
 
         run_process.assert_called_once_with(
             [
-                str(aspis_script),
+                str(aspis_script.resolve()),
                 "-g",
                 "-o",
                 "program",
