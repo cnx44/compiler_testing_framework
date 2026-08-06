@@ -45,6 +45,15 @@ class BaseInjectorTest(unittest.TestCase):
         self.assertEqual(command[-2:], ["--args", injector.target_bin])
         self.assertEqual(run_process.call_args.kwargs["env"]["TARGET_FUNC"], "target")
 
+    @patch("src.injector.subprocess.run")
+    def test_injector_respects_custom_debugger_path(self, run_process):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
+        env = Environment(gdb_executable="/opt/custom/gdb")
+        injector = NormalExecution(env, "/tmp/program", "/tmp/main.c", "target")
+        injector.run()
+        command = run_process.call_args.args[0]
+        self.assertEqual(command[0], "/opt/custom/gdb")
+
 
 
     def test_extract_state_parses_output_and_inferior_stdout(self):

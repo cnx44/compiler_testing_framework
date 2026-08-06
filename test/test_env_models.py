@@ -10,12 +10,19 @@ class EnvironmentTest(unittest.TestCase):
         self.assertEqual(environment.aspis_path, "")
         self.assertEqual(environment.vanilla_compiler, "clang")
         self.assertEqual(environment.llvm_path, "")
+        self.assertEqual(environment.gdb_executable, "gdb")
+        self.assertEqual(environment.lldb_executable, "lldb")
 
     def test_accepts_custom_toolchain_paths(self):
         environment = Environment("/aspis/aspis.sh", "/llvm/clang", "/llvm/bin")
         self.assertEqual(environment.aspis_path, "/aspis/aspis.sh")
         self.assertEqual(environment.vanilla_compiler, "/llvm/clang")
         self.assertEqual(environment.llvm_path, "/llvm/bin")
+
+    def test_accepts_custom_debugger_paths(self):
+        environment = Environment(gdb_executable="/opt/gdb-multiarch", lldb_executable="/usr/local/bin/lldb-17")
+        self.assertEqual(environment.gdb_executable, "/opt/gdb-multiarch")
+        self.assertEqual(environment.lldb_executable, "/usr/local/bin/lldb-17")
 
 
 class ModelsTest(unittest.TestCase):

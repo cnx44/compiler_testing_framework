@@ -251,6 +251,17 @@ rax = 0x2
         with self.assertRaisesRegex(ValueError, "Unsupported debugger"):
             StubRunner()._run_debugger("unknown", 1, [])
 
+    @patch("src.campaign_runner.subprocess.run")
+    def test_debugger_command_accepts_custom_debugger_paths(self, run_process):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
+        runner = StubRunner()
+        runner.exe = "/tmp/program"
+        runner.src = "main.c"
+        
+        runner._run_debugger("/opt/custom/gdb-multiarch", 10, [])
+        command = run_process.call_args.args[0]
+        self.assertEqual(command[0], "/opt/custom/gdb-multiarch")
+
 
 class OracleRunnerTest(unittest.TestCase):
     @patch("src.campaign_runner.subprocess.run")
