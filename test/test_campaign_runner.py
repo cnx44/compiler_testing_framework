@@ -219,10 +219,9 @@ rax = 0x2
 
         runner._run_debugger("gdb", 10, [], ["sum"])
 
-        command = run_process.call_args.args[0]
-        self.assertIn('printf "@@GLOBALS@@\\n"', command)
-        self.assertIn('printf "sum = "', command)
-        self.assertIn("output sum", command)
+        kwargs = run_process.call_args.kwargs
+        self.assertIn("env", kwargs)
+        self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
 
     @patch("src.campaign_runner.subprocess.run")
     def test_lldb_command_prints_requested_global_variables(self, run_process):
@@ -233,9 +232,9 @@ rax = 0x2
 
         runner._run_debugger("lldb", 10, [], ["sum"])
 
-        command = run_process.call_args.args[0]
-        self.assertIn("script print('@@GLOBALS@@')", command)
-        self.assertIn("target variable sum", command)
+        kwargs = run_process.call_args.kwargs
+        self.assertIn("env", kwargs)
+        self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
 
     def test_debugger_rejects_invalid_variable_names(self):
         with self.assertRaisesRegex(ValueError, "bad-name"):

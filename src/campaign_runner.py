@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import math
 from pathlib import Path
+import os
 import platform
 import re
 import shlex
@@ -199,47 +200,28 @@ class ProgramRunner(ABC):
         else:
             raise ValueError(f"Unsupported debugger: {debugger}")
         
+        run_env = os.environ.copy()
+        run_env["TARGET_SRC"] = str(self.src)
+        run_env["RETURN_LINE"] = str(return_line)
+        run_env["VARS_TO_CHECK"] = ",".join(variable_names)
+        
+        base_dir = Path(__file__).parent / "gdb_scripts"
+        
         if flavor == "gdb":
+            script = base_dir / "snapshot_gdb.py"
             command = [
-                debugger, "--batch", "-q", self.exe,
-                "-ex", f"break {self.src}:{return_line}",
-                "-ex", f"run {shlex.join(args)}",
-                "-ex", 'printf "@@ARGS@@\\n"',
-                "-ex", "info args",
-                "-ex", 'printf "@@LOCALS@@\\n"',
-                "-ex", "info locals",
-                "-ex", 'printf "@@GLOBALS@@\\n"',
+                debugger, "--batch", "-q",
+                "-x", str(script),
+                "--args", self.exe, *args
             ]
-            for name in variable_names:
-                command.extend([
-                    "-ex", f'printf "{name} = "',
-                    "-ex", f"output {name}",
-                    "-ex", 'printf "\\n"',
-                ])
-            command.extend([
-                "-ex", 'printf "@@REGISTERS@@\\n"',
-                "-ex", "info registers",
-            ])
         elif flavor == "lldb":
-            source_name = shlex.quote(Path(self.src).name)
+            script = base_dir / "snapshot_lldb.py"
             command = [
-                debugger, "--batch", "--no-lldbinit", self.exe,
-                "-o", f"breakpoint set --file {source_name} --line {return_line}",
-                "-o", f"run {shlex.join(args)}",
-                "-o", "script print('@@ARGS@@')",
-                "-o", "frame variable",
-                "-o", "script print('@@LOCALS@@')",
-                "-o", "script print('@@GLOBALS@@')",
+                debugger, "--batch", "--no-lldbinit", self.exe, "--", *args,
+                "-o", f"command script import {script}"
             ]
-            for name in variable_names:
-                command.extend(["-o", f"target variable {name}"])
-            command.extend([
-                "-o", "script print('@@REGISTERS@@')",
-                "-o", "register read",
-            ])
-        else:
-            raise ValueError(f"Unsupported debugger: {debugger}")
-        return subprocess.run(command, capture_output=True, text=True)
+            
+        return subprocess.run(command, capture_output=True, text=True, env=run_env)
 
     def _debug_variable_names(self, variable_names: list[str]):
         invalid = [
