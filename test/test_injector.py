@@ -41,7 +41,7 @@ class BaseInjectorTest(unittest.TestCase):
         )
         command = run_process.call_args.args[0]
         self.assertEqual(command[:5], ["gdb", "-batch", "-q", "-x", str(injector.base_dir / "profile_target.py")])
-        self.assertEqual(command[-2:], ["--args", "/tmp/program"])
+        self.assertEqual(command[-2:], ["--args", injector.target_bin])
         self.assertEqual(run_process.call_args.kwargs["env"]["TARGET_FUNC"], "target")
 
 
@@ -147,7 +147,7 @@ rax 0x4
                 "-x",
                 injector.gdb_script,
                 "--args",
-                "/tmp/program",
+                injector.target_bin,
                 "one",
                 "two",
             ],

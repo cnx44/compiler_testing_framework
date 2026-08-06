@@ -109,7 +109,7 @@ class RunnerConfigTransformer(Transformer):
           return Campaign(runs=list(items))
 
 """Parses a campaign configuration file into a typed Campaign object."""
-def parse_runner_config(config_path: str) -> Campaign:
+def parse_runner_config(config_path: str | Path) -> Campaign:
     # Load the grammar and initialize the LALR parser
     grammar_path = Path(__file__).with_name("grammar.lark")
     grammar = grammar_path.read_text(encoding="utf-8")

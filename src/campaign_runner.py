@@ -415,7 +415,7 @@ class AspisRunner(ProgramRunner):
             index += 1
         return normalized
 
-    def _absolute_flag_path(self, path: str):
+    def _absolute_flag_path(self, path: str | Path):
         flag_path = Path(path)
         return str(flag_path if flag_path.is_absolute() else flag_path.resolve())
 
@@ -443,7 +443,7 @@ class CampaignRun:
         self,
         campaign: Campaign,
         environment: Envoirment,
-        log_path: str = "CampaignRun.log",
+        log_path: str | Path = "CampaignRun.log",
         debugger: str | None = None,
     ):
         self.campaign = campaign
@@ -522,7 +522,7 @@ class CampaignRun:
     def _entry_source(self, programs: list[str]):
         return next((program for program in programs if Path(program).suffix in {".c", ".cpp", ".rs"}), None)
 
-    def _args_from_values_file(self, source_file: str):
+    def _args_from_values_file(self, source_file: str | Path):
         values_path = Path(source_file).with_suffix(".values")
         if not values_path.is_file():
             return []

@@ -7,9 +7,9 @@ from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
 class BaseInjector(ABC):
 
-    def __init__(self, target_bin: str, target_src: str, target_func: str = "main"):
-        self.target_bin = target_bin
-        self.target_src = target_src
+    def __init__(self, target_bin: str | Path, target_src: str | Path, target_func: str = "main"):
+        self.target_bin = Path(target_bin).resolve()
+        self.target_src = Path(target_src).resolve()
         self.target_func = target_func
         self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
 
@@ -140,7 +140,7 @@ class BaseInjector(ABC):
 
 
 class RegisterInjector(BaseInjector):
-    def __init__(self, target_bin: str, target_src: str, target_func: str = "main", data_only: bool = False):
+    def __init__(self, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False):
         super().__init__(target_bin, target_src, target_func)
         self.data_only = data_only
 
@@ -162,7 +162,7 @@ class RegisterInjector(BaseInjector):
 
 
 class MemoryInjector(BaseInjector):
-    def __init__(self, target_bin: str, target_src: str, target_func: str = "main", 
+    def __init__(self, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
                  payload_ptr: str = "", length_var: str = ""):
         super().__init__(target_bin, target_src, target_func)
         self.payload_ptr = payload_ptr
