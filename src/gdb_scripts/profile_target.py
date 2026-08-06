@@ -17,7 +17,8 @@ def profile():
             return
 
         # Route output to avoid cluttering stdout during execution
-        gdb.execute("set args > .inferior_out.txt")
+        out_file = os.environ.get("INFERIOR_OUT", ".inferior_out.txt")
+        gdb.execute(f"set args > {out_file}")
         gdb.execute("start")
         gdb.execute("delete")
         gdb.execute(f"break {target_func}")

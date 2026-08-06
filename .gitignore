@@ -1,7 +1,5 @@
 note.md
 ./.venv
-
 *.pyc
 .venv/
-.inferior_out.txt
 .agents

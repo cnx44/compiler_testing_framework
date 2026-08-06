@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
@@ -50,10 +51,10 @@ class BaseInjector(ABC):
         run_env = os.environ.copy()
         run_env.update(self.setup())
         
-        inferior_out = Path(".inferior_out.txt")
-        if inferior_out.exists():
-            inferior_out.unlink()
-
+        with tempfile.NamedTemporaryFile(delete=False) as temp_out:
+            inferior_out = Path(temp_out.name)
+            
+        run_env["INFERIOR_OUT"] = str(inferior_out)
         run_env["ENTRY_FUNC"] = self.target_func
 
         command = [
@@ -89,6 +90,9 @@ class BaseInjector(ABC):
         # Extract the internal state
         state = self._extract_state(stdout, stderr, inferior_out)
         
+        if inferior_out.exists():
+            inferior_out.unlink()
+            
         return ExecutionResult(event=event, state=state)
 
     def _extract_state(self, stdout: str, stderr: str, inferior_out: Path) -> ExecutionState:

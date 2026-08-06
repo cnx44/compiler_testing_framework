@@ -39,7 +39,8 @@ def inject_smart_register():
         max_steps = int(max_steps_env)
         profiled_regs = target_regs_env.split(",")
 
-        gdb.execute("set args > .inferior_out.txt")
+        out_file = os.environ.get("INFERIOR_OUT", ".inferior_out.txt")
+        gdb.execute(f"set args > {out_file}")
         gdb.execute("start")
         gdb.execute("delete")
 
