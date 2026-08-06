@@ -1,18 +1,18 @@
 import unittest
 
-from src.env import Envoirment
+from src.env import Environment
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
 
 class EnvironmentTest(unittest.TestCase):
     def test_defaults(self):
-        environment = Envoirment()
+        environment = Environment()
         self.assertEqual(environment.aspis_path, "")
         self.assertEqual(environment.vanilla_compiler, "clang")
         self.assertEqual(environment.llvm_path, "")
 
     def test_accepts_custom_toolchain_paths(self):
-        environment = Envoirment("/aspis/aspis.sh", "/llvm/clang", "/llvm/bin")
+        environment = Environment("/aspis/aspis.sh", "/llvm/clang", "/llvm/bin")
         self.assertEqual(environment.aspis_path, "/aspis/aspis.sh")
         self.assertEqual(environment.vanilla_compiler, "/llvm/clang")
         self.assertEqual(environment.llvm_path, "/llvm/bin")

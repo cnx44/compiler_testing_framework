@@ -11,13 +11,13 @@ import tempfile
 import time
 
 from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
-from src.env import Envoirment
+from src.env import Environment
 
 
 class ProgramRunner(ABC):
     """Build, execute, and inspect a program with a configured toolchain."""
 
-    def __init__(self, environment: Envoirment, debugger: str | None = None):
+    def __init__(self, environment: Environment, debugger: str | None = None):
         self.environment = environment
         self.debugger = debugger
         self.src = ""
@@ -312,7 +312,7 @@ class OracleRunner(ProgramRunner):
     ):
         compiler = self.environment.vanilla_compiler
         if not compiler:
-            raise RuntimeError("Envoirment.vanilla_compiler is not configured.")
+            raise RuntimeError("Environment.vanilla_compiler is not configured.")
         compile_result = subprocess.run(
             [
                 compiler,
@@ -335,7 +335,7 @@ class AspisRunner(ProgramRunner):
 
     def __init__(
         self,
-        environment: Envoirment,
+        environment: Environment,
         data_protection: DataProtectionMode = DataProtectionMode.EDDI,
         control_flow_protection: ControlFlowMode = ControlFlowMode.CFCSS,
         debugger: str | None = None,
@@ -351,7 +351,7 @@ class AspisRunner(ProgramRunner):
     ):
         aspis_script = Path(self.environment.aspis_path).resolve()
         if not self.environment.aspis_path or not aspis_script.is_file():
-            raise RuntimeError("Envoirment.aspis_path must point to an ASPIS script.")
+            raise RuntimeError("Environment.aspis_path must point to an ASPIS script.")
 
         build_dir = Path(self.exe).parent
         command = [
@@ -442,7 +442,7 @@ class CampaignRun:
     def __init__(
         self,
         campaign: Campaign,
-        environment: Envoirment,
+        environment: Environment,
         log_path: str | Path = "CampaignRun.log",
         debugger: str | None = None,
     ):

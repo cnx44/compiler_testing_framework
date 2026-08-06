@@ -11,12 +11,12 @@ from src.config_parser import (
     DataProtectionMode,
     RunnerTest,
 )
-from src.env import Envoirment
+from src.env import Environment
 
 
 class StubRunner(ProgramRunner):
     def __init__(self, environment=None, debugger=None):
-        super().__init__(environment or Envoirment(), debugger)
+        super().__init__(environment or Environment(), debugger)
         self.compiled_sources = []
         self.compiler_flags = []
 
@@ -29,7 +29,7 @@ class StubRunner(ProgramRunner):
 class ProgramRunnerTest(unittest.TestCase):
     def test_is_abstract(self):
         with self.assertRaises(TypeError):
-            ProgramRunner(Envoirment())
+            ProgramRunner(Environment())
 
     def test_source_files_accepts_c_and_cpp_and_ignores_other_extensions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -257,7 +257,7 @@ class OracleRunnerTest(unittest.TestCase):
     @patch("src.campaign_runner.subprocess.run")
     def test_compile_uses_compiler_from_environment_and_all_sources(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = OracleRunner(Envoirment(vanilla_compiler="/tools/clang"))
+        runner = OracleRunner(Environment(vanilla_compiler="/tools/clang"))
         runner.exe = "/tmp/output"
         sources = [Path("main.c"), Path("helper.cpp")]
 
@@ -280,14 +280,14 @@ class OracleRunnerTest(unittest.TestCase):
         )
 
     def test_compile_requires_a_configured_compiler(self):
-        runner = OracleRunner(Envoirment(vanilla_compiler=""))
+        runner = OracleRunner(Environment(vanilla_compiler=""))
         with self.assertRaisesRegex(RuntimeError, "vanilla_compiler"):
             runner._compile([Path("main.c")])
 
     @patch("src.campaign_runner.subprocess.run")
     def test_compile_exposes_compiler_errors(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 1, "", "bad C")
-        runner = OracleRunner(Envoirment(vanilla_compiler="clang"))
+        runner = OracleRunner(Environment(vanilla_compiler="clang"))
         runner.exe = "/tmp/output"
         with self.assertRaisesRegex(RuntimeError, "bad C"):
             runner._compile([Path("main.c")])
@@ -295,7 +295,7 @@ class OracleRunnerTest(unittest.TestCase):
 
 class AspisRunnerTest(unittest.TestCase):
     def test_mode_arguments_cover_every_supported_combination(self):
-        environment = Envoirment()
+        environment = Environment()
         data_flags = {
             DataProtectionMode.EDDI: "--eddi",
             DataProtectionMode.SEDDI: "--seddi",
@@ -323,7 +323,7 @@ class AspisRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             aspis_script = Path(directory) / "aspis.sh"
             aspis_script.touch()
-            environment = Envoirment(
+            environment = Environment(
                 aspis_path=str(aspis_script),
                 vanilla_compiler="unused",
                 llvm_path="/tools/llvm",
@@ -362,7 +362,7 @@ class AspisRunnerTest(unittest.TestCase):
         )
 
     def test_compiler_paths_remain_relative_to_campaign_directory(self):
-        runner = AspisRunner(Envoirment())
+        runner = AspisRunner(Environment())
 
         flags = runner._compiler_flags_for_build_dir([
             "-Iinclude",
@@ -393,7 +393,7 @@ class AspisRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             aspis_script = Path(directory) / "aspis.sh"
             aspis_script.touch()
-            runner = AspisRunner(Envoirment(aspis_path=str(aspis_script)))
+            runner = AspisRunner(Environment(aspis_path=str(aspis_script)))
             runner.exe = str(Path(directory) / "program")
             runner._compile([Path("main.c")])
 
@@ -401,7 +401,7 @@ class AspisRunnerTest(unittest.TestCase):
         self.assertNotIn("--llvm-bin", command)
 
     def test_compile_requires_existing_aspis_script(self):
-        runner = AspisRunner(Envoirment(aspis_path="/missing/aspis.sh"))
+        runner = AspisRunner(Environment(aspis_path="/missing/aspis.sh"))
         with self.assertRaisesRegex(RuntimeError, "aspis_path"):
             runner._compile([Path("main.c")])
 
@@ -411,7 +411,7 @@ class AspisRunnerTest(unittest.TestCase):
             [], 1, "ASPIS output", "ASPIS error"
         )
         with tempfile.NamedTemporaryFile(suffix=".sh") as script:
-            runner = AspisRunner(Envoirment(aspis_path=script.name))
+            runner = AspisRunner(Environment(aspis_path=script.name))
             runner.exe = "/tmp/program"
             with self.assertRaisesRegex(
                 RuntimeError, "ASPIS output\nASPIS error"
@@ -472,7 +472,7 @@ class CampaignRunTest(unittest.TestCase):
                 order.append("aspis execute") or aspis_results
             )
         )
-        environment = Envoirment(aspis_path="/aspis", vanilla_compiler="/clang")
+        environment = Environment(aspis_path="/aspis", vanilla_compiler="/clang")
 
         with tempfile.TemporaryDirectory() as directory:
             log_path = Path(directory) / "campaign.log"
@@ -544,7 +544,7 @@ class CampaignRunTest(unittest.TestCase):
             log_path = Path(directory) / "campaign.log"
             campaign_run = CampaignRun(
                 self._campaign(programs=[str(source)]),
-                Envoirment(),
+                Environment(),
                 str(log_path),
             )
             campaign_run.run_campaign()
@@ -558,7 +558,7 @@ class CampaignRunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runner = CampaignRun(
                 self._campaign(programs=["README.txt"]),
-                Envoirment(),
+                Environment(),
                 str(Path(directory) / "campaign.log"),
             )
             log = runner.run_campaign()
@@ -570,14 +570,14 @@ class CampaignRunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runner = CampaignRun(
                 self._campaign(),
-                Envoirment(),
+                Environment(),
                 str(Path(directory) / "campaign.log"),
             )
             log = runner.run_campaign([])
         self.assertIn("ERROR: compiler down", log)
 
     def test_comparison_marks_differences_and_missing_variables(self):
-        runner = CampaignRun(self._campaign(), Envoirment())
+        runner = CampaignRun(self._campaign(), Environment())
         lines = runner._comparison_lines(
             {
                 "returncode": 0,
