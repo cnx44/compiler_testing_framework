@@ -5,10 +5,12 @@ import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
+from src.env import Environment
 
 class BaseInjector(ABC):
 
-    def __init__(self, target_bin: str | Path, target_src: str | Path, target_func: str = "main"):
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main"):
+        self.env = env
         self.target_bin = Path(target_bin).resolve()
         self.target_src = Path(target_src).resolve()
         self.target_func = target_func
@@ -32,7 +34,7 @@ class BaseInjector(ABC):
         profile_script = self.base_dir / "profile_target.py"
         
         result = subprocess.run(
-            ["gdb", "-batch", "-q", "-x", str(profile_script), "--args", self.target_bin],
+            [self.env.gdb_executable, "-batch", "-q", "-x", str(profile_script), "--args", self.target_bin],
             capture_output=True, text=True, env=env
         )
         
@@ -58,7 +60,7 @@ class BaseInjector(ABC):
         run_env["ENTRY_FUNC"] = self.target_func
 
         command = [
-            "gdb", "--batch", "-q",
+            self.env.gdb_executable, "--batch", "-q",
             "-x", self.gdb_script,
             "--args", self.target_bin, *args
         ]
@@ -144,8 +146,8 @@ class BaseInjector(ABC):
 
 
 class RegisterInjector(BaseInjector):
-    def __init__(self, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False):
-        super().__init__(target_bin, target_src, target_func)
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False):
+        super().__init__(env, target_bin, target_src, target_func)
         self.data_only = data_only
 
     @property
@@ -166,9 +168,9 @@ class RegisterInjector(BaseInjector):
 
 
 class MemoryInjector(BaseInjector):
-    def __init__(self, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
                  payload_ptr: str = "", length_var: str = ""):
-        super().__init__(target_bin, target_src, target_func)
+        super().__init__(env, target_bin, target_src, target_func)
         self.payload_ptr = payload_ptr
         self.length_var = length_var
         self.data_only = bool(payload_ptr)

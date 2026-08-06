@@ -13,15 +13,16 @@ from src.injector import (
     RegisterInjector,
 )
 from src.models import ExecutionState, TerminationEvent
+from src.env import Environment
 
 
 class BaseInjectorTest(unittest.TestCase):
     def _injector(self, source: str):
-        return NormalExecution("/tmp/program", source, "main")
+        return NormalExecution(Environment(), "/tmp/program", source, "main")
 
     def test_is_abstract(self):
         with self.assertRaises(TypeError):
-            BaseInjector("program", "main.c", "main")
+            BaseInjector(Environment(), "program", "main.c", "main")
 
     @patch("src.injector.subprocess.run")
     def test_profile_target_parses_steps_and_registers(self, run_process):
@@ -31,7 +32,7 @@ class BaseInjectorTest(unittest.TestCase):
             "noise\nPROFILED_STEPS=42\nPROFILED_REGS=rax,rbx\n",
             "",
         )
-        injector = NormalExecution("/tmp/program", "/tmp/main.c", "target")
+        injector = NormalExecution(Environment(), "/tmp/program", "/tmp/main.c", "target")
 
         profile = injector.profile_target()
 
@@ -158,7 +159,7 @@ rax 0x4
 
 class InjectorImplementationsTest(unittest.TestCase):
     def test_register_injector_setup(self):
-        injector = RegisterInjector("program", "main.c", "work", data_only=True)
+        injector = RegisterInjector(Environment(), "program", "main.c", "work", data_only=True)
         injector.profile_target = Mock(
             return_value={"MAX_STEPS": "20", "TARGET_REGS": "rax,rbx"}
         )
@@ -174,7 +175,7 @@ class InjectorImplementationsTest(unittest.TestCase):
         self.assertTrue(injector.gdb_script.endswith("gdb_scripts/inject_registers.py"))
 
     def test_register_injector_requires_complete_profile(self):
-        injector = RegisterInjector("program", "main.c", "work")
+        injector = RegisterInjector(Environment(), "program", "main.c", "work")
         for profile in ({}, {"MAX_STEPS": "1"}, {"TARGET_REGS": "rax"}):
             with self.subTest(profile=profile):
                 injector.profile_target = Mock(return_value=profile)
@@ -183,6 +184,7 @@ class InjectorImplementationsTest(unittest.TestCase):
 
     def test_memory_injector_setup(self):
         injector = MemoryInjector(
+            Environment(),
             "program",
             "main.c",
             "work",
@@ -203,13 +205,13 @@ class InjectorImplementationsTest(unittest.TestCase):
         self.assertTrue(injector.gdb_script.endswith("gdb_scripts/inject_memory.py"))
 
     def test_memory_injector_requires_profiled_steps(self):
-        injector = MemoryInjector("program", "main.c", "work")
+        injector = MemoryInjector(Environment(), "program", "main.c", "work")
         injector.profile_target = Mock(return_value={})
         with self.assertRaisesRegex(RuntimeError, "Profiling failed"):
             injector.setup()
 
-    def test_normal_execution_has_no_injection_environment(self):
-        injector = NormalExecution("program", "main.c", "main")
+    def test_normal_execution_setup(self):
+        injector = NormalExecution(Environment(), "program", "main.c", "main")
         self.assertEqual(injector.setup(), {})
         self.assertTrue(
             injector.gdb_script.endswith("gdb_scripts/extract_baseline_state.py")

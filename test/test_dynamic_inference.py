@@ -6,6 +6,7 @@ from unittest.mock import patch, Mock
 
 from src.injector import MemoryInjector
 from src.models import ExecutionState
+from src.env import Environment
 
 class TestDynamicInference(unittest.TestCase):
     def test_dynamic_inference_static_array(self):
@@ -26,6 +27,7 @@ int main() {
             subprocess.run(["gcc", "-g", str(src_file), "-o", str(exe_file)], check=True)
             
             injector = MemoryInjector(
+                env=Environment(),
                 target_bin=str(exe_file), 
                 target_src=str(src_file), 
                 target_func="work",
@@ -69,6 +71,7 @@ int main() {
             subprocess.run(["gcc", "-g", str(src_file), "-o", str(exe_file)], check=True)
             
             injector = MemoryInjector(
+                env=Environment(),
                 target_bin=str(exe_file), 
                 target_src=str(src_file), 
                 target_func="work",

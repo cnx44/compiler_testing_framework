@@ -178,9 +178,9 @@ class ProgramRunner(ABC):
         if self.debugger is not None:
             candidates = [self.debugger]
         elif platform.system() == "Darwin":
-            candidates = ["lldb", "gdb"]
+            candidates = [self.environment.lldb_executable, self.environment.gdb_executable]
         else:
-            candidates = ["gdb", "lldb"]
+            candidates = [self.environment.gdb_executable, self.environment.lldb_executable]
         return [debugger for debugger in candidates if shutil.which(debugger)]
 
     def _run_debugger(
@@ -191,9 +191,17 @@ class ProgramRunner(ABC):
         variables_to_check: list[str] | None = None,
     ):
         variable_names = self._debug_variable_names(variables_to_check or [])
-        if debugger == "gdb":
+        debugger_name = Path(debugger).name.lower()
+        if "gdb" in debugger_name:
+            flavor = "gdb"
+        elif "lldb" in debugger_name:
+            flavor = "lldb"
+        else:
+            raise ValueError(f"Unsupported debugger: {debugger}")
+        
+        if flavor == "gdb":
             command = [
-                "gdb", "--batch", "-q", self.exe,
+                debugger, "--batch", "-q", self.exe,
                 "-ex", f"break {self.src}:{return_line}",
                 "-ex", f"run {shlex.join(args)}",
                 "-ex", 'printf "@@ARGS@@\\n"',
@@ -212,10 +220,10 @@ class ProgramRunner(ABC):
                 "-ex", 'printf "@@REGISTERS@@\\n"',
                 "-ex", "info registers",
             ])
-        elif debugger == "lldb":
+        elif flavor == "lldb":
             source_name = shlex.quote(Path(self.src).name)
             command = [
-                "lldb", "--batch", "--no-lldbinit", self.exe,
+                debugger, "--batch", "--no-lldbinit", self.exe,
                 "-o", f"breakpoint set --file {source_name} --line {return_line}",
                 "-o", f"run {shlex.join(args)}",
                 "-o", "script print('@@ARGS@@')",
@@ -289,7 +297,7 @@ class ProgramRunner(ABC):
             "print('MAX_LINE=' + str(gdb_utils.get_end_line('main')))"
         )
         result = subprocess.run(
-            ["gdb", "--batch", "-q", self.exe, "-ex", script],
+            [self.environment.gdb_executable, "--batch", "-q", self.exe, "-ex", script],
             capture_output=True,
             text=True,
         )
