@@ -12,6 +12,7 @@ from src.config_parser import (
     RunnerTest,
 )
 from src.env import Environment
+from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
 
 class StubRunner(ProgramRunner):
@@ -436,6 +437,7 @@ class CampaignRunTest(unittest.TestCase):
         variables=None,
         compiler_flags=None,
         execution_repetitions=1,
+        functions=None,
     ):
         return Campaign(
             runs=[
@@ -446,6 +448,7 @@ class CampaignRunTest(unittest.TestCase):
                     control_flow_protection=ControlFlowMode.RASM,
                     compiler_flags=compiler_flags or [],
                     execution_repetitions=execution_repetitions,
+                    functions=functions or [],
                     vars=variables or ["x"],
                 )
             ]
@@ -529,6 +532,96 @@ class CampaignRunTest(unittest.TestCase):
             {"absolute": 0, "percent": 0.0},
         )
         self.assertEqual(written_log, "\n".join(log))
+
+    @patch("src.campaign_runner.AspisRunner")
+    @patch("src.campaign_runner.OracleRunner")
+    def test_runs_and_logs_every_injector_repetition(
+        self, oracle_class, aspis_class
+    ):
+        normal_results = {
+            "returncode": 0,
+            "stdout": "ok",
+            "stderr": "",
+            "variables": {},
+            "execution_time_seconds": 1.0,
+            "binary_size_bytes": 100,
+        }
+        oracle_class.return_value.execute.return_value = normal_results
+        aspis_class.return_value.execute.return_value = normal_results
+        aspis_class.return_value.exe = "/tmp/aspis-program"
+
+        injector = Mock()
+        injector.run.side_effect = [
+            ExecutionResult(
+                TerminationEvent.ASPIS_DATA,
+                ExecutionState(
+                    stdout="first output",
+                    stderr="first error",
+                    variables={"x": "1"},
+                    registers={"rax": "0x1"},
+                ),
+            ),
+            ExecutionResult(
+                TerminationEvent.CRASHED,
+                ExecutionState(error="snapshot unavailable"),
+            ),
+        ]
+
+        factory = Mock(return_value=injector)
+        with tempfile.TemporaryDirectory() as directory:
+            campaign_run = CampaignRun(
+                self._campaign(
+                    functions=["work"], execution_repetitions=2
+                ),
+                Environment(),
+                Path(directory) / "campaign.log",
+                debugger="gdb",
+                injector_factories=[factory],
+            )
+            log = campaign_run.run_campaign(["arg"])
+
+        factory.assert_called_once_with(
+            campaign_run.environment,
+            "/tmp/aspis-program",
+            "main.c",
+            "work",
+            debugger="gdb",
+        )
+        self.assertEqual(injector.run.call_args_list, [call(["arg"]), call(["arg"])])
+        injection_results = campaign_run.results[0]["fault_injections"][0]
+        self.assertEqual(injection_results["execution_repetitions"], 2)
+        self.assertEqual(injection_results["caught_faults"], 1)
+        self.assertEqual(injection_results["event_counts"]["ASPIS_DATA"], 1)
+        self.assertEqual(injection_results["event_counts"]["CRASHED"], 1)
+        self.assertEqual(
+            injection_results["runs"][0]["state"]["registers"],
+            {"rax": "0x1"},
+        )
+        self.assertIn("Fault injection:", log)
+        self.assertIn("  Injection type: Mock", log)
+        self.assertTrue(
+            any(
+                '"stdout": "first output"' in line
+                and '"event": "ASPIS_DATA"' in line
+                for line in log
+            )
+        )
+
+    def test_injector_errors_are_logged_and_do_not_stop_repetitions(self):
+        injector = Mock()
+        injector.run.side_effect = [
+            RuntimeError("debugger unavailable"),
+            ExecutionResult(TerminationEvent.RETURNED, ExecutionState(stdout="ok")),
+        ]
+        runner = CampaignRun(self._campaign(), Environment())
+
+        result = runner._run_injector(injector, "main", [], 2)
+
+        self.assertEqual(result["event_counts"]["INTERNAL_ERROR"], 1)
+        self.assertEqual(result["event_counts"]["RETURNED"], 1)
+        self.assertEqual(
+            result["runs"][0]["state"]["error"], "debugger unavailable"
+        )
 
     @patch("src.campaign_runner.AspisRunner")
     @patch("src.campaign_runner.OracleRunner")
