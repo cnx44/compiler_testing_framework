@@ -1,8 +1,5 @@
 from abc import ABC, abstractmethod
-from collections import Counter
-from dataclasses import asdict
 import math
-import json
 from pathlib import Path
 import os
 import platform
@@ -13,32 +10,10 @@ import statistics
 import subprocess
 import tempfile
 import time
-from typing import Iterable, Protocol
 
 from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
 from src.env import Environment
-from src.injector import MemoryInjector, RegisterInjector
-from src.models import ExecutionResult, ExecutionState, TerminationEvent
-
-
-class Injector(Protocol):
-    """Minimal contract used by the campaign runner for fault injection."""
-
-    def run(self, args: list[str] | None = None) -> ExecutionResult:
-        ...
-
-
-class InjectorFactory(Protocol):
-    def __call__(
-        self,
-        environment: Environment,
-        target_binary: str | Path,
-        target_source: str | Path,
-        target_function: str,
-        *,
-        debugger: str | None = None,
-    ) -> Injector:
-        ...
+from src.injector import BaseInjector, RegisterInjector
 
 
 class ProgramRunner(ABC):
@@ -461,17 +436,11 @@ class CampaignRun:
         environment: Environment,
         log_path: str | Path = "CampaignRun.log",
         debugger: str | None = None,
-        injector_factories: Iterable[InjectorFactory] | None = None,
     ):
         self.campaign = campaign
         self.environment = environment
         self.log_path = Path(log_path)
         self.debugger = debugger
-        self.injector_factories = (
-            (RegisterInjector, MemoryInjector)
-            if injector_factories is None
-            else tuple(injector_factories)
-        )
         self.log = []
         self.results: list[dict] = []
 
@@ -520,26 +489,28 @@ class CampaignRun:
                 differences = self._measurement_differences(
                     oracle_results, aspis_results
                 )
-                fault_injections = self._run_fault_injections(
-                    aspis_runner.exe,
-                    entry_source,
-                    run.functions,
-                    run_args,
-                    run.execution_repetitions,
-                )
+                for target_function in run.functions:
+                    injector: BaseInjector = RegisterInjector(
+                        self.environment,
+                        aspis_runner.exe,
+                        entry_source,
+                        target_function,
+                        debugger=self.debugger,
+                    )
+                    for _ in range(run.execution_repetitions):
+                        result = injector.run(run_args)
+                        self.log.append(f"Injection result: {result}")
                 self.results.append(
                     {
                         "name": run.name,
                         "oracle": oracle_results,
                         "aspis": aspis_results,
                         "difference": differences,
-                        "fault_injections": fault_injections,
                     }
                 )
                 self.log.extend(
                     self._comparison_lines(oracle_results, aspis_results, run.vars)
                 )
-                self.log.extend(self._fault_injection_lines(fault_injections))
             except Exception as error:
                 self.log.append(f"ERROR: {error}")
             finally:
@@ -549,108 +520,6 @@ class CampaignRun:
 
         self.log_path.write_text("\n".join(self.log), encoding="utf-8")
         return self.log
-
-    def _run_fault_injections(
-        self,
-        target_binary: str | Path,
-        target_source: str | Path,
-        target_functions: list[str],
-        args: list[str],
-        execution_repetitions: int,
-    ):
-        """Run every configured injector without depending on its implementation."""
-        campaigns = []
-        for target_function in target_functions:
-            for factory in self.injector_factories:
-                injector = factory(
-                    self.environment,
-                    target_binary,
-                    target_source,
-                    target_function,
-                    debugger=self.debugger,
-                )
-                campaigns.append(
-                    self._run_injector(
-                        injector,
-                        target_function,
-                        args,
-                        execution_repetitions,
-                    )
-                )
-        return campaigns
-
-    def _run_injector(
-        self,
-        injector: Injector,
-        target_function: str,
-        args: list[str],
-        execution_repetitions: int,
-    ):
-        injection_type = type(injector).__name__
-        runs = []
-        counts = Counter({event.value: 0 for event in TerminationEvent})
-
-        for repetition in range(1, execution_repetitions + 1):
-            try:
-                result = injector.run(args)
-            except Exception as error:
-                result = ExecutionResult(
-                    event=TerminationEvent.INTERNAL_ERROR,
-                    state=ExecutionState(error=str(error)),
-                )
-
-            outcome = {
-                "repetition": repetition,
-                "event": result.event.value,
-                "state": asdict(result.state),
-            }
-            runs.append(outcome)
-            counts[outcome["event"]] += 1
-
-        caught_faults = (
-            counts[TerminationEvent.ASPIS_DATA.value]
-            + counts[TerminationEvent.ASPIS_CF.value]
-        )
-        return {
-            "injection_type": injection_type,
-            "target_function": target_function,
-            "execution_repetitions": execution_repetitions,
-            "event_counts": dict(counts),
-            "caught_faults": caught_faults,
-            "runs": runs,
-        }
-
-    def _fault_injection_lines(self, campaigns: list[dict]):
-        if not campaigns:
-            return [
-                "Fault injection: skipped "
-                "(no target functions or injectors configured)."
-            ]
-
-        lines = ["Fault injection:"]
-        for campaign in campaigns:
-            lines.extend(
-                [
-                    f"  Injection type: {campaign['injection_type']}",
-                    f"  Target function: {campaign['target_function']}",
-                    "  Event counts: "
-                    + json.dumps(campaign["event_counts"], sort_keys=True),
-                    "  Caught faults: "
-                    f"{campaign['caught_faults']}/{campaign['execution_repetitions']}",
-                ]
-            )
-            for outcome in campaign["runs"]:
-                lines.append(
-                    f"  Repetition {outcome['repetition']}: "
-                    + json.dumps(
-                        {
-                            "event": outcome["event"],
-                            "state": outcome["state"],
-                        },
-                        sort_keys=True,
-                    )
-                )
-        return lines
 
     def _entry_source(self, programs: list[str]):
         return next((program for program in programs if Path(program).suffix in {".c", ".cpp", ".rs"}), None)
