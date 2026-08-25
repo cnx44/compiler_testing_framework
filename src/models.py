@@ -14,6 +14,7 @@ class TerminationEvent(Enum):
 class ExecutionState:
     stdout: str = ""
     stderr: str = ""
+    debugger_output: str = ""
     variables: Dict[str, str] = field(default_factory=dict)
     registers: Dict[str, str] = field(default_factory=dict)
     error: str = "" 

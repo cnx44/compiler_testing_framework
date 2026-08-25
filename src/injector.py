@@ -225,7 +225,8 @@ class BaseInjector(ABC):
         """Parses the GDB output to extract variables and registers into a typed state."""
         state = ExecutionState(
             stdout=inferior_out.read_text().strip() if inferior_out.exists() else "",
-            stderr=stderr
+            stderr=stderr,
+            debugger_output=stdout
         )
 
         try:
@@ -325,6 +326,33 @@ class MemoryInjector(BaseInjector):
         }
 
 
+class GlobalInjector(BaseInjector):
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
+                 target_global: str = "", debugger: str | None = None):
+        super().__init__(env, target_bin, target_src, target_func, debugger)
+        self.target_global = target_global
+
+    @property
+    def gdb_script(self) -> str:
+        return str(self.base_dir / "inject_globals.py")
+
+    @property
+    def lldb_script(self) -> str:
+        return str(self.base_dir / "inject_globals_lldb.py")
+
+    def setup(self) -> dict:
+        profile_data = self.profile_target()
+        if "MAX_STEPS" not in profile_data:
+            raise RuntimeError("Profiling failed to extract maximum dynamic instructions.")
+            
+        return {
+            "TARGET_FUNC"       : self.target_func,
+            "MAX_STEPS"         : profile_data["MAX_STEPS"],
+            "TARGET_GLOBAL"     : self.target_global,
+            "TARGET_SRC"        : str(self.target_src.name),
+        }
+
+
 class NormalExecution(BaseInjector):
     """Executes the target natively without injecting a fault, capturing the baseline state."""
     
@@ -338,3 +366,4 @@ class NormalExecution(BaseInjector):
 
     def setup(self) -> dict:
         return {}
+

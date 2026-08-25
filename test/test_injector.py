@@ -11,6 +11,7 @@ from src.injector import (
     MemoryInjector,
     NormalExecution,
     RegisterInjector,
+    GlobalInjector,
 )
 from src.models import ExecutionState, TerminationEvent
 from src.env import Environment
@@ -252,6 +253,35 @@ class InjectorImplementationsTest(unittest.TestCase):
 
     def test_memory_injector_requires_profiled_steps(self):
         injector = MemoryInjector(Environment(), "program", "main.c", "work")
+        injector.profile_target = Mock(return_value={})
+        with self.assertRaisesRegex(RuntimeError, "Profiling failed"):
+            injector.setup()
+
+    def test_global_injector_setup(self):
+        injector = GlobalInjector(
+            Environment(),
+            "program",
+            "main.c",
+            "work",
+            target_global="my_var",
+        )
+        injector.profile_target = Mock(return_value={"MAX_STEPS": "42"})
+        self.assertEqual(
+            injector.setup(),
+            {
+                "TARGET_FUNC": "work",
+                "MAX_STEPS": "42",
+                "TARGET_GLOBAL": "my_var",
+                "TARGET_SRC": "main.c",
+            },
+        )
+        self.assertTrue(injector.gdb_script.endswith("gdb_scripts/inject_globals.py"))
+        self.assertTrue(
+            injector.lldb_script.endswith("gdb_scripts/inject_globals_lldb.py")
+        )
+
+    def test_global_injector_requires_profiled_steps(self):
+        injector = GlobalInjector(Environment(), "program", "main.c", "work")
         injector.profile_target = Mock(return_value={})
         with self.assertRaisesRegex(RuntimeError, "Profiling failed"):
             injector.setup()
