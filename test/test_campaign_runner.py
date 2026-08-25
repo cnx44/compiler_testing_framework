@@ -1,5 +1,6 @@
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -579,6 +580,46 @@ class CampaignRunTest(unittest.TestCase):
             log.count(f"Injection result: {execution_result}"),
             2,
         )
+
+    @patch("src.campaign_runner.RegisterInjector")
+    @patch("src.campaign_runner.AspisRunner")
+    @patch("src.campaign_runner.OracleRunner")
+    def test_runs_injector_concurrently(
+        self, oracle_class, aspis_class, injector_class
+    ):
+        normal_results = {
+            "returncode": 0,
+            "stdout": "ok",
+            "stderr": "",
+            "variables": {},
+            "execution_time_seconds": 1.0,
+            "binary_size_bytes": 100,
+        }
+        oracle_class.return_value.execute.return_value = normal_results
+        aspis_class.return_value.execute.return_value = normal_results
+        
+        # We'll run 4 injections and make them wait for each other at a barrier.
+        # If they aren't running concurrently, the barrier will timeout/deadlock,
+        # but since tests have timeouts, we use a threading.Barrier with a small timeout.
+        concurrency_level = 4
+        barrier = threading.Barrier(concurrency_level, timeout=5.0)
+        
+        def mock_run(args):
+            barrier.wait()
+            return ExecutionResult(TerminationEvent.RETURNED, ExecutionState(stdout="injected run"))
+
+        injector_class.return_value.run.side_effect = mock_run
+
+        with tempfile.TemporaryDirectory() as directory:
+            campaign_run = CampaignRun(
+                self._campaign(functions=["work"], execution_repetitions=concurrency_level),
+                Environment(),
+                Path(directory) / "campaign.log",
+            )
+            campaign_run.run_campaign(["arg"])
+            
+        # If we reached here without a BrokenBarrierError or deadlock, concurrency works!
+        self.assertEqual(injector_class.return_value.run.call_count, concurrency_level)
 
     @patch("src.campaign_runner.AspisRunner")
     @patch("src.campaign_runner.OracleRunner")

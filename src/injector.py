@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
@@ -26,6 +27,8 @@ class BaseInjector(ABC):
         self.debugger = debugger
         self._selected_debugger: str | None = None
         self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
+        self._setup_lock = threading.Lock()
+        self._setup_cache: dict | None = None
 
     @abstractmethod
     def setup(self) -> dict:
@@ -145,7 +148,12 @@ class BaseInjector(ABC):
         """Executes a single injection and extracts the final execution state."""
         args = args or []
         run_env = os.environ.copy()
-        run_env.update(self.setup())
+        
+        if self._setup_cache is None:
+            with self._setup_lock:
+                if self._setup_cache is None:
+                    self._setup_cache = self.setup()
+        run_env.update(self._setup_cache)
         
         with tempfile.NamedTemporaryFile(delete=False) as temp_out:
             inferior_out = Path(temp_out.name)

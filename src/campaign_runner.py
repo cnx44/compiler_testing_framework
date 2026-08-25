@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import concurrent.futures
 import math
 from pathlib import Path
 import os
@@ -497,9 +498,17 @@ class CampaignRun:
                         target_function,
                         debugger=self.debugger,
                     )
-                    for _ in range(run.execution_repetitions):
-                        result = injector.run(run_args)
-                        self.log.append(f"Injection result: {result}")
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        futures = [
+                            executor.submit(injector.run, run_args)
+                            for _ in range(run.execution_repetitions)
+                        ]
+                        for future in concurrent.futures.as_completed(futures):
+                            try:
+                                result = future.result()
+                                self.log.append(f"Injection result: {result}")
+                            except Exception as e:
+                                self.log.append(f"Injection error: {e}")
                 self.results.append(
                     {
                         "name": run.name,
