@@ -19,12 +19,14 @@ class BaseInjector(ABC):
         target_src: str | Path,
         target_func: str = "main",
         debugger: str | None = None,
+        timeout_ms: int = 5000,
     ):
         self.env = env
         self.target_bin = Path(target_bin).resolve()
         self.target_src = Path(target_src).resolve()
         self.target_func = target_func
         self.debugger = debugger
+        self.timeout_ms = timeout_ms
         self._selected_debugger: str | None = None
         self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
         self._setup_lock = threading.Lock()
@@ -178,7 +180,7 @@ class BaseInjector(ABC):
                     capture_output=True,
                     text=True,
                     env=run_env,
-                    timeout=5,
+                    timeout=self.timeout_ms / 1000.0,
                 )
                 exit_code = process.returncode
                 stdout = process.stdout
@@ -279,8 +281,8 @@ class BaseInjector(ABC):
 
 
 class RegisterInjector(BaseInjector):
-    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False, debugger: str | None = None):
-        super().__init__(env, target_bin, target_src, target_func, debugger)
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False, debugger: str | None = None, timeout_ms: int = 5000):
+        super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms)
         self.data_only = data_only
 
     @property
@@ -306,8 +308,8 @@ class RegisterInjector(BaseInjector):
 
 class MemoryInjector(BaseInjector):
     def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
-                 payload_ptr: str = "", length_var: str = "", debugger: str | None = None):
-        super().__init__(env, target_bin, target_src, target_func, debugger)
+                 payload_ptr: str = "", length_var: str = "", debugger: str | None = None, timeout_ms: int = 5000):
+        super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms)
         self.payload_ptr = payload_ptr
         self.length_var = length_var
         self.data_only = bool(payload_ptr)
@@ -336,8 +338,8 @@ class MemoryInjector(BaseInjector):
 
 class GlobalInjector(BaseInjector):
     def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
-                 target_global: str = "", debugger: str | None = None):
-        super().__init__(env, target_bin, target_src, target_func, debugger)
+                 target_global: str = "", debugger: str | None = None, timeout_ms: int = 5000):
+        super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms)
         self.target_global = target_global
 
     @property

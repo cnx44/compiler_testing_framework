@@ -1,15 +1,26 @@
 <CAMPAIGN> ::= (<TEST>)+;
 
 <TEST> ::=	"name:" <WORD> NL
-			"prorgrams: ["					<PROGRAMS> "]"		NL
+			"programs: ["					<PROGRAMS> "]"		NL
 			"data_protection:"				<DATA_PROTECTION>	NL
 			"control_flow_protection:"		<CONTROL_FLOW>		NL
+			["timeout_ms:"					<POSITIVE_INT>		NL]
 			["execution_repetitions:"		<POSITIVE_INT>		NL]
 			["compiler_flags: ["			<COMPILER_FLAGS> "]"	NL]
-			["functions: ["					<FUNCTIONS> "]"		NL] 
-			["vars:["						<VARS> "]"			NL];
+			["injection:"					<INJECTION_MODE>	NL]
+			["functions: ["					<FUNCTIONS> "]"		NL];
 
-<PROGRAM>	::= <WORD> "." <EXT;
+<INJECTION_MODE> ::= <REGISTER_MODE> | <MEMORY_MODE> | <GLOBAL_MODE>;
+<REGISTER_MODE> ::= "register" ["data_only:" ("true" | "false")];
+<MEMORY_MODE> ::= "memory";
+<GLOBAL_MODE> ::= "global" ["target_global:" <WORD>];
+
+<FUNCTIONS> ::= <FUNCTION_DEF> ("," <FUNCTION_DEF>)*;
+<FUNCTION_DEF> ::= <WORD> ["(" <VAR_LIST> ")"];
+<VAR_LIST> ::= <VAR_DEF> ("," <VAR_DEF>)*;
+<VAR_DEF> ::= <WORD> [":" <POSITIVE_INT>];
+
+<PROGRAM>	::= <WORD> "." <EXT>;
 <EXT>		::= "c" | "cpp" | "rs";
 <PROGRAMS>  ::= <PROGRAM> ("," <PROGRAM>)+;
 

@@ -12,9 +12,9 @@ import subprocess
 import tempfile
 import time
 
-from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
+from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode, RegisterInjection, MemoryInjection, GlobalInjection
 from src.env import Environment
-from src.injector import BaseInjector, RegisterInjector
+from src.injector import BaseInjector, RegisterInjector, MemoryInjector, GlobalInjector
 
 
 class ProgramRunner(ABC):
@@ -476,31 +476,26 @@ class CampaignRun:
             )
 
             try:
+                vars_to_check = [var.name for tf in run.functions for var in tf.variables]
+
                 # Build both variants before executing either one. This keeps the
                 # selected ASPIS protection modes tied to this campaign run.
                 oracle_runner.compile(run.programs, run.compiler_flags)
                 aspis_runner.compile(run.programs, run.compiler_flags)
 
                 oracle_results = oracle_runner.execute(
-                    run_args, run.vars, run.execution_repetitions
+                    run_args, vars_to_check, run.execution_repetitions
                 )
                 aspis_results = aspis_runner.execute(
-                    run_args, run.vars, run.execution_repetitions
+                    run_args, vars_to_check, run.execution_repetitions
                 )
                 differences = self._measurement_differences(
                     oracle_results, aspis_results
                 )
-                for target_function in run.functions:
-                    injector: BaseInjector = RegisterInjector(
-                        self.environment,
-                        aspis_runner.exe,
-                        entry_source,
-                        target_function,
-                        debugger=self.debugger,
-                    )
+                def _run_inj(inj):
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         futures = [
-                            executor.submit(injector.run, run_args)
+                            executor.submit(inj.run, run_args)
                             for _ in range(run.execution_repetitions)
                         ]
                         for future in concurrent.futures.as_completed(futures):
@@ -509,6 +504,55 @@ class CampaignRun:
                                 self.log.append(f"Injection result: {result}")
                             except Exception as e:
                                 self.log.append(f"Injection error: {e}")
+
+                for target_function in run.functions:
+                    if isinstance(run.injection, RegisterInjection):
+                        injector: BaseInjector = RegisterInjector(
+                            self.environment,
+                            aspis_runner.exe,
+                            entry_source,
+                            target_function.name,
+                            data_only=run.injection.data_only,
+                            debugger=self.debugger,
+                            timeout_ms=run.timeout_ms
+                        )
+                        _run_inj(injector)
+                    elif isinstance(run.injection, MemoryInjection):
+                        if not target_function.variables:
+                            injector = MemoryInjector(
+                                self.environment,
+                                aspis_runner.exe,
+                                entry_source,
+                                target_function.name,
+                                debugger=self.debugger,
+                                timeout_ms=run.timeout_ms
+                            )
+                            _run_inj(injector)
+                        else:
+                            for var in target_function.variables:
+                                injector = MemoryInjector(
+                                    self.environment,
+                                    aspis_runner.exe,
+                                    entry_source,
+                                    target_function.name,
+                                    payload_ptr=var.name,
+                                    length_var=str(var.length) if var.length else "",
+                                    debugger=self.debugger,
+                                    timeout_ms=run.timeout_ms
+                                )
+                                _run_inj(injector)
+                    elif isinstance(run.injection, GlobalInjection):
+                        injector = GlobalInjector(
+                            self.environment,
+                            aspis_runner.exe,
+                            entry_source,
+                            target_function.name,
+                            target_global=run.injection.target_global,
+                            debugger=self.debugger,
+                            timeout_ms=run.timeout_ms
+                        )
+                        _run_inj(injector)
+
                 self.results.append(
                     {
                         "name": run.name,
@@ -518,7 +562,7 @@ class CampaignRun:
                     }
                 )
                 self.log.extend(
-                    self._comparison_lines(oracle_results, aspis_results, run.vars)
+                    self._comparison_lines(oracle_results, aspis_results, vars_to_check)
                 )
             except Exception as error:
                 self.log.append(f"ERROR: {error}")

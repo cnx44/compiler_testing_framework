@@ -11,6 +11,11 @@ from src.config_parser import (
     RunnerTest,
     RunnerConfigTransformer,
     parse_runner_config,
+    RegisterInjection,
+    MemoryInjection,
+    GlobalInjection,
+    TargetFunction,
+    TargetVariable,
 )
 
 
@@ -32,10 +37,11 @@ class ParseRunnerConfigTest(unittest.TestCase):
 programs: [main.c, utils.cpp]
 data_protection: eddi
 control_flow_protection: inter-rasm
+timeout_ms: 6000
 execution_repetitions: 25
 compiler_flags: [-lm, -DTRACE=1, -I../include]
-functions: [main, helper]
-vars: [x, y]
+injection: memory
+functions: [main(var1:10, var2), helper]
 """
         )
 
@@ -48,10 +54,14 @@ vars: [x, y]
                     programs=["main.c", "utils.cpp"],
                     data_protection=DataProtectionMode.EDDI,
                     control_flow_protection=ControlFlowMode.INTER_RASM,
+                    timeout_ms=6000,
                     execution_repetitions=25,
                     compiler_flags=["-lm", "-DTRACE=1", "-I../include"],
-                    functions=["main", "helper"],
-                    vars=["x", "y"],
+                    injection=MemoryInjection(),
+                    functions=[
+                        TargetFunction("main", [TargetVariable("var1", 10), TargetVariable("var2", None)]),
+                        TargetFunction("helper", [])
+                    ],
                 )
             ],
         )
@@ -66,17 +76,19 @@ name: second
 programs: [two.cpp, notes.rs]
 data_protection: seddi
 control_flow_protection: cfcss
+injection: register data_only: true
 functions: []
-vars: []
 """
         )
 
         self.assertEqual(len(campaign.runs), 2)
         self.assertEqual(campaign.runs[0].functions, [])
-        self.assertEqual(campaign.runs[0].vars, [])
         self.assertEqual(campaign.runs[0].compiler_flags, [])
         self.assertEqual(campaign.runs[0].execution_repetitions, 1)
+        self.assertEqual(campaign.runs[0].timeout_ms, 5000)
+        self.assertEqual(campaign.runs[0].injection, RegisterInjection())
         self.assertEqual(campaign.runs[1].programs, ["two.cpp", "notes.rs"])
+        self.assertEqual(campaign.runs[1].injection, RegisterInjection(data_only=True))
         self.assertIs(
             campaign.runs[0].data_protection,
             DataProtectionMode.NONE,

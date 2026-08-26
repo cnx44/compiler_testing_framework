@@ -18,13 +18,36 @@ class ControlFlowMode(Enum):
     NONE        = 4
 
 @dataclass(frozen=True)
+class RegisterInjection:
+    data_only: bool = False
+
+@dataclass(frozen=True)
+class MemoryInjection:
+    pass
+
+@dataclass(frozen=True)
+class GlobalInjection:
+    target_global: str = ""
+
+@dataclass(frozen=True)
+class TargetVariable:
+    name: str
+    length: int | None = None
+
+@dataclass(frozen=True)
+class TargetFunction:
+    name: str
+    variables: list[TargetVariable] = field(default_factory=list)
+
+@dataclass(frozen=True)
 class RunnerTest:
     name: str
     programs: list[str]
     data_protection: DataProtectionMode
     control_flow_protection: ControlFlowMode
-    functions: list[str] = field(default_factory=list)
-    vars: list[str] = field(default_factory=list)
+    injection: RegisterInjection | MemoryInjection | GlobalInjection = field(default_factory=RegisterInjection)
+    timeout_ms: int = 5000
+    functions: list[TargetFunction] = field(default_factory=list)
     compiler_flags: list[str] = field(default_factory=list)
     execution_repetitions: int = 1
 
@@ -40,6 +63,9 @@ class RunnerConfigTransformer(Transformer):
     def EXT(self, token):
         return str(token)
     
+    def BOOLEAN(self, token):
+        return str(token) == "true"
+        
     @staticmethod
     def _token_to_enum(enum_type, token):
         enum_name = str(token).upper().replace("-", "_")
@@ -77,15 +103,43 @@ class RunnerConfigTransformer(Transformer):
         repetitions = next(item for item in items if isinstance(item, int))
         return ("execution_repetitions", repetitions)
 
+    def timeout(self, items):
+        return ("timeout_ms", int(items[1]))
+
+    def register_mode(self, items):
+        data_only = items[1] if items else False
+        return RegisterInjection(data_only=data_only)
+        
+    def memory_mode(self, items):
+        return MemoryInjection()
+        
+    def global_mode(self, items):
+        target_global = items[0] if items else ""
+        return GlobalInjection(target_global=target_global)
+        
+    def injection(self, items):
+        return ("injection", items[1])
+
+    def var_def(self, items):
+        name = items[0]
+        length = items[1] if len(items) > 1 else None
+        return TargetVariable(name=name, length=length)
+        
+    def var_list(self, items):
+        return list(items)
+        
+    def function_def(self, items):
+        name = items[0]
+        variables = items[1] if len(items) > 1 else []
+        return TargetFunction(name=name, variables=variables)
+        
+    def function_list(self, items):
+        return list(items)
+
     def functions(self, items):
         lists = [item for item in items if isinstance(item, list)]
         return ("functions", lists[0] if lists else [])
 
-    def vars(self, items):
-        lists = [item for item in items if isinstance(item, list)]
-        return ("vars", lists[0] if lists else [])
-
-    
     def test(self, items):
           values = [
               item for item in items
@@ -102,7 +156,8 @@ class RunnerConfigTransformer(Transformer):
               compiler_flags=optional.get("compiler_flags", []),
               execution_repetitions=optional.get("execution_repetitions", 1),
               functions=optional.get("functions", []),
-              vars=optional.get("vars", []),
+              injection=optional.get("injection", RegisterInjection()),
+              timeout_ms=optional.get("timeout_ms", 5000),
           )
 
     def campaign(self, items):

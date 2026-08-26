@@ -11,6 +11,8 @@ from src.config_parser import (
     ControlFlowMode,
     DataProtectionMode,
     RunnerTest,
+    TargetFunction,
+    TargetVariable,
 )
 from src.env import Environment
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
@@ -435,11 +437,12 @@ class CampaignRunTest(unittest.TestCase):
     def _campaign(
         self,
         programs=None,
-        variables=None,
         compiler_flags=None,
+        variables=None,
         execution_repetitions=1,
         functions=None,
     ):
+        target_funcs = [TargetFunction(f, [TargetVariable(v) for v in (variables or ["x"])]) for f in (functions or ["main"])]
         return Campaign(
             runs=[
                 RunnerTest(
@@ -449,8 +452,7 @@ class CampaignRunTest(unittest.TestCase):
                     control_flow_protection=ControlFlowMode.RASM,
                     compiler_flags=compiler_flags or [],
                     execution_repetitions=execution_repetitions,
-                    functions=functions or [],
-                    vars=variables or ["x"],
+                    functions=target_funcs,
                 )
             ]
         )
@@ -570,7 +572,9 @@ class CampaignRunTest(unittest.TestCase):
             "/tmp/aspis-program",
             "main.c",
             "work",
+            data_only=False,
             debugger=None,
+            timeout_ms=5000,
         )
         self.assertEqual(
             injector_class.return_value.run.call_args_list,

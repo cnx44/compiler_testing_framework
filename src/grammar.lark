@@ -1,29 +1,41 @@
 campaign: test+
 
-test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL execution_repetitions? compiler_flags? functions? vars?
+test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL timeout? execution_repetitions? compiler_flags? injection? functions?
 
+timeout: TIMEOUT_K POSITIVE_INT NL
 execution_repetitions: EXECUTION_REPETITIONS_K POSITIVE_INT NL
 compiler_flags: COMPILER_FLAGS_K "[" compiler_flag_list? "]" NL
-functions: FUNCTIONS_K "[" word_list? "]" NL
-vars:	   VARS_K "[" word_list? "]" NL
+
+injection: INJECTION_K injection_mode NL
+?injection_mode: register_mode | memory_mode | global_mode
+register_mode: "register" (DATA_ONLY_K BOOLEAN)?
+memory_mode: "memory"
+global_mode: "global" (TARGET_GLOBAL_K WORD)?
+
+functions: FUNCTIONS_K "[" function_list? "]" NL
+function_list: function_def ("," function_def)*
+function_def: WORD ("(" var_list ")")?
+var_list: var_def ("," var_def)*
+var_def: WORD (":" POSITIVE_INT)?
 
 programs: program ("," program)*
 program:  WORD "." EXT
 
-word_list: WORD ("," WORD)*
 compiler_flag_list: COMPILER_FLAG ("," COMPILER_FLAG)*
 
 NAME_K:				"name:"
-COMPILER_FORMAT_K:	"compiler_format:"
 PROGRAMS_K:			"programs:"
 DATA_PROTECTION_K:	"data_protection:"
 CONTROL_FLOW_K:		"control_flow_protection:"
+TIMEOUT_K:			"timeout_ms:"
 EXECUTION_REPETITIONS_K: "execution_repetitions:"
 COMPILER_FLAGS_K:	"compiler_flags:"
+INJECTION_K:		"injection:"
 FUNCTIONS_K:		"functions:"
-VARS_K:				"vars:"
+DATA_ONLY_K:		"data_only:"
+TARGET_GLOBAL_K:	"target_global:"
+BOOLEAN:			"true" | "false"
 
-COMPILER_FORMAT: "c" | "cpp" | "rs" | "none"
 DATA_PROTECTION: "eddi" | "seddi" | "fdsc" | "none"
 CONTROL_FLOW:	 "cfcss" | "rasm" | "inter-rasm" | "none"
 EXT:			 "c" | "cpp" | "rs"
