@@ -390,6 +390,7 @@ class AspisRunnerTest(unittest.TestCase):
                 aspis_path=str(aspis_script),
                 vanilla_compiler="unused",
                 llvm_path="/tools/llvm",
+                aspis_flags=["--no-cleanup", "--coarse-grained"],
             )
             runner = AspisRunner(
                 environment,
@@ -414,6 +415,8 @@ class AspisRunnerTest(unittest.TestCase):
                 "/tools/llvm",
                 "--seddi",
                 "--inter-rasm",
+                "--no-cleanup",
+                "--coarse-grained",
                 str(Path("main.c").resolve()),
                 str(Path("helper.cpp").resolve()),
                 "-Wall",

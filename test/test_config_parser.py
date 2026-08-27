@@ -122,6 +122,18 @@ functions: []
             with self.subTest(mode=text):
                 self.assertIs(transformer.CONTROL_FLOW(text), mode)
 
+    def test_parses_global_injection_target(self):
+        campaign = self._parse(
+            """name: global_test
+programs: [main.c]
+data_protection: none
+control_flow_protection: none
+injection: global target_global: counter
+"""
+        )
+
+        self.assertEqual(campaign.runs[0].injection, GlobalInjection("counter"))
+
     def test_rejects_invalid_configuration(self):
         with self.assertRaises(UnexpectedInput):
             self._parse(

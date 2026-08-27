@@ -114,7 +114,11 @@ class RunnerConfigTransformer(Transformer):
         return MemoryInjection()
         
     def global_mode(self, items):
-        target_global = items[0] if items else ""
+        # ``TARGET_GLOBAL_K`` is preserved by Lark alongside the variable name.
+        # Keep only the value so a configuration written by the TUI round-trips.
+        target_global = next(
+            (item for item in items if not str(item).endswith(":")), ""
+        )
         return GlobalInjection(target_global=target_global)
         
     def injection(self, items):

@@ -364,6 +364,7 @@ class AspisRunner(ProgramRunner):
         if self.environment.llvm_path:
             command.extend(["--llvm-bin", self.environment.llvm_path])
         command.extend(self._aspis_mode_args())
+        command.extend(self.environment.aspis_flags)
         command.extend(str(source.resolve()) for source in sources)
         command.extend(self._compiler_flags_for_build_dir(compiler_flags or []))
 

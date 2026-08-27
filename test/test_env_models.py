@@ -12,6 +12,13 @@ class EnvironmentTest(unittest.TestCase):
         self.assertEqual(environment.llvm_path, "")
         self.assertEqual(environment.gdb_executable, "gdb")
         self.assertEqual(environment.lldb_executable, "lldb")
+        self.assertEqual(environment.aspis_flags, [])
+
+    def test_default_aspis_flags_are_independent(self):
+        first = Environment()
+        second = Environment()
+        first.aspis_flags.append("--no-cleanup")
+        self.assertEqual(second.aspis_flags, [])
 
     def test_accepts_custom_toolchain_paths(self):
         environment = Environment("/aspis/aspis.sh", "/llvm/clang", "/llvm/bin")
