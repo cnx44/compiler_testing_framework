@@ -2,6 +2,7 @@
 import gdb
 import os
 
+
 def get_end_line(entry_func="main"):
     """Returns the maximum line number belonging to the entry function using DWARF line tables."""
     try:
@@ -10,7 +11,9 @@ def get_end_line(entry_func="main"):
         if block:
             start_pc = block.start
             end_pc = block.end
-            sym, _ = gdb.lookup_symbol(entry_func)
+            sym = gdb.lookup_global_symbol(entry_func)
+            if sym is None and hasattr(gdb, "lookup_static_symbol"):
+                sym = gdb.lookup_static_symbol(entry_func)
             lines = set()
             if sym and sym.symtab:
                 for entry in sym.symtab.linetable():
@@ -22,18 +25,32 @@ def get_end_line(entry_func="main"):
         pass
     return -1
 
-def continue_and_dump_state():
-    """Continues execution to the end of main and dumps the state."""
-    entry_func = os.environ.get("ENTRY_FUNC", "main")
-    max_line = get_end_line(entry_func)
-    if max_line != -1:
-        try:
-            gdb.execute(f"break {max_line}")
-        except Exception:
-            pass
 
+def run_to_function(entry_func="main"):
+    """Starts the inferior and stops at the requested function entry."""
+    breakpoint = gdb.Breakpoint(entry_func)
+    gdb.execute("run")
+    breakpoint.delete()
+
+
+def continue_to_function_return(entry_func="main"):
+    """Continues to the final source line while the function frame is active."""
+    return_line = get_end_line(entry_func)
+    if return_line == -1:
+        raise RuntimeError(f"Could not determine return line for '{entry_func}'.")
+    breakpoint = gdb.Breakpoint(str(return_line))
     try:
         gdb.execute("continue")
+    finally:
+        breakpoint.delete()
+
+
+def continue_and_dump_state():
+    """Continues to the configured function return and dumps its state."""
+    entry_func = os.environ.get("ENTRY_FUNC", "main")
+
+    try:
+        continue_to_function_return(entry_func)
     except gdb.error:
         pass # Continue to dump state even if it crashes
         

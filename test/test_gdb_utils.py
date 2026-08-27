@@ -48,7 +48,7 @@ class TestGdbUtils(unittest.TestCase):
         mock_entry.pc = 0x1020
         mock_entry.line = 42
         mock_sym.symtab.linetable.return_value = [mock_entry]
-        gdb_mock.lookup_symbol.return_value = (mock_sym, None)
+        gdb_mock.lookup_global_symbol.return_value = mock_sym
         
         # This should NOT raise an exception because gdb_utils catches gdb.error
         gdb_utils.continue_and_dump_state()
@@ -77,7 +77,7 @@ class TestGdbUtils(unittest.TestCase):
         mock_entry.pc = 0x1020
         mock_entry.line = 42
         mock_sym.symtab.linetable.return_value = [mock_entry]
-        gdb_mock.lookup_symbol.return_value = (mock_sym, None)
+        gdb_mock.lookup_global_symbol.return_value = mock_sym
         
         # No exception is raised
         gdb_utils.continue_and_dump_state()

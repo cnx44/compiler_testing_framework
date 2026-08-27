@@ -99,8 +99,8 @@ def get_arch_config(target):
     }
 
 
-def continue_and_dump_state(debugger, target, process):
-    """Stop near the end of the current function and emit portable markers."""
+def continue_to_function_return(target, process):
+    """Stop near the end of the current function while its frame is active."""
     try:
         frame = selected_frame(process)
         function = frame.GetFunction()
@@ -120,9 +120,13 @@ def continue_and_dump_state(debugger, target, process):
     except Exception:
         pass
 
+
+def continue_and_dump_state(debugger, target, process):
+    """Continue to the current function return and emit portable markers."""
+    continue_to_function_return(target, process)
+
     print("@@ARGS@@")
     debugger.HandleCommand("frame variable")
     print("@@LOCALS@@")
     print("@@REGISTERS@@")
     debugger.HandleCommand("register read")
-

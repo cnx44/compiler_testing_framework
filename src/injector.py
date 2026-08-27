@@ -7,10 +7,70 @@ import tempfile
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
+from src.config_parser import (
+    GlobalInjection,
+    MemoryInjection,
+    RegisterInjection,
+    TargetFunction,
+)
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
 from src.env import Environment
 
 class BaseInjector(ABC):
+
+    @staticmethod
+    def create_for_target(
+        injection: RegisterInjection | MemoryInjection | GlobalInjection,
+        env: Environment,
+        target_bin: str | Path,
+        target_src: str | Path,
+        target_function: TargetFunction,
+        debugger: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> list["BaseInjector"]:
+        """Build the injectors required by one configured target function."""
+        common_args = (
+            env,
+            target_bin,
+            target_src,
+            target_function.name,
+        )
+        common_kwargs = {
+            "debugger": debugger,
+            "timeout_ms": timeout_ms,
+        }
+
+        if isinstance(injection, RegisterInjection):
+            return [
+                RegisterInjector(
+                    *common_args,
+                    data_only=injection.data_only,
+                    **common_kwargs,
+                )
+            ]
+        if isinstance(injection, MemoryInjection):
+            if not target_function.variables:
+                return [MemoryInjector(*common_args, **common_kwargs)]
+            return [
+                MemoryInjector(
+                    *common_args,
+                    payload_ptr=variable.name,
+                    length_var=str(variable.length) if variable.length else "",
+                    **common_kwargs,
+                )
+                for variable in target_function.variables
+            ]
+        if isinstance(injection, GlobalInjection):
+            return [
+                GlobalInjector(
+                    *common_args,
+                    target_global=injection.target_global,
+                    **common_kwargs,
+                )
+            ]
+        raise TypeError(
+            f"Unsupported injection configuration: {type(injection).__name__}"
+        )
 
     def __init__(
         self,
@@ -376,4 +436,3 @@ class NormalExecution(BaseInjector):
 
     def setup(self) -> dict:
         return {}
-

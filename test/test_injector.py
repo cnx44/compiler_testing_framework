@@ -15,6 +15,13 @@ from src.injector import (
 )
 from src.models import ExecutionState, TerminationEvent
 from src.env import Environment
+from src.config_parser import (
+    GlobalInjection,
+    MemoryInjection,
+    RegisterInjection,
+    TargetFunction,
+    TargetVariable,
+)
 
 
 class BaseInjectorTest(unittest.TestCase):
@@ -199,6 +206,68 @@ rax 0x4
 
 
 class InjectorImplementationsTest(unittest.TestCase):
+    def test_factory_creates_register_injector(self):
+        injectors = BaseInjector.create_for_target(
+            RegisterInjection(data_only=True),
+            Environment(),
+            "program",
+            "main.c",
+            TargetFunction("work"),
+            debugger="gdb",
+            timeout_ms=1000,
+        )
+
+        self.assertEqual(len(injectors), 1)
+        self.assertIsInstance(injectors[0], RegisterInjector)
+        self.assertTrue(injectors[0].data_only)
+        self.assertEqual(injectors[0].debugger, "gdb")
+        self.assertEqual(injectors[0].timeout_ms, 1000)
+
+    def test_factory_creates_memory_injector_for_each_variable(self):
+        injectors = BaseInjector.create_for_target(
+            MemoryInjection(),
+            Environment(),
+            "program",
+            "main.c",
+            TargetFunction(
+                "work",
+                [TargetVariable("buffer", 8), TargetVariable("value")],
+            ),
+        )
+
+        self.assertEqual(len(injectors), 2)
+        self.assertTrue(all(isinstance(item, MemoryInjector) for item in injectors))
+        self.assertEqual(
+            [(item.payload_ptr, item.length_var) for item in injectors],
+            [("buffer", "8"), ("value", "")],
+        )
+
+    def test_factory_creates_generic_memory_injector_without_variables(self):
+        injectors = BaseInjector.create_for_target(
+            MemoryInjection(),
+            Environment(),
+            "program",
+            "main.c",
+            TargetFunction("work"),
+        )
+
+        self.assertEqual(len(injectors), 1)
+        self.assertIsInstance(injectors[0], MemoryInjector)
+        self.assertEqual(injectors[0].payload_ptr, "")
+
+    def test_factory_creates_global_injector(self):
+        injectors = BaseInjector.create_for_target(
+            GlobalInjection(target_global="counter"),
+            Environment(),
+            "program",
+            "main.c",
+            TargetFunction("work"),
+        )
+
+        self.assertEqual(len(injectors), 1)
+        self.assertIsInstance(injectors[0], GlobalInjector)
+        self.assertEqual(injectors[0].target_global, "counter")
+
     def test_register_injector_setup(self):
         injector = RegisterInjector(Environment(), "program", "main.c", "work", data_only=True)
         injector.profile_target = Mock(

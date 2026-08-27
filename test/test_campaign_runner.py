@@ -87,7 +87,18 @@ class ProgramRunnerTest(unittest.TestCase):
         self.assertEqual(runner.size, 6)
         self.assertEqual(runner.compiled_sources, [Path(source.name)])
         self.assertEqual(runner.compiler_flags, ["-lm"])
-        runner._debug_snapshot.assert_called_once_with(["one", "two"], None)
+        runner._debug_snapshot.assert_called_once_with(
+            ["one", "two"], None, "main"
+        )
+        self.assertEqual(
+            results["snapshots"],
+            {
+                "main": {
+                    "variables": {"x": "1"},
+                    "registers": {"rax": "0x1"},
+                }
+            },
+        )
         self.assertEqual(run_process.call_args.args[0][1:], ["one", "two"])
         self.assertIsNone(runner._build_dir)
         self.assertFalse(Path(runner.exe).exists())
@@ -134,6 +145,37 @@ class ProgramRunnerTest(unittest.TestCase):
             finally:
                 runner.cleanup()
 
+    @patch("src.campaign_runner.subprocess.run")
+    def test_execute_collects_a_snapshot_for_each_target_function(
+        self, run_process
+    ):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
+        runner = StubRunner()
+        runner._debug_snapshot = Mock(
+            side_effect=lambda _args, _variables, function: {
+                "variables": {function: "value"},
+                "registers": {"pc": function},
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".c") as source:
+            runner.compile([source.name])
+            try:
+                results = runner.execute(
+                    functions_to_check=["work", "helper", "work"]
+                )
+            finally:
+                runner.cleanup()
+
+        self.assertEqual(list(results["snapshots"]), ["work", "helper"])
+        self.assertEqual(
+            results["variables"], {"work": "value", "helper": "value"}
+        )
+        self.assertEqual(
+            runner._debug_snapshot.call_args_list,
+            [call([], None, "work"), call([], None, "helper")],
+        )
+
     def test_parses_gdb_and_lldb_snapshot_formats(self):
         runner = StubRunner()
         output = """noise
@@ -165,7 +207,6 @@ rbx = 0x2
     def test_debug_snapshot_tries_next_debugger_after_failure(self):
         runner = StubRunner()
         runner.src = __file__
-        runner._main_return_line = Mock(return_value=10)
         runner._debuggers = Mock(return_value=["gdb", "lldb"])
         valid_output = """@@ARGS@@
 argc = 1
@@ -181,15 +222,18 @@ rax = 0x1
             ]
         )
 
-        snapshot = runner._debug_snapshot([])
+        snapshot = runner._debug_snapshot([], target_function="work")
 
         self.assertEqual(snapshot["variables"]["x"], "2")
         self.assertEqual(snapshot["registers"]["rax"], "0x1")
         self.assertEqual(runner._run_debugger.call_count, 2)
+        self.assertEqual(
+            runner._run_debugger.call_args_list,
+            [call("gdb", "work", [], None), call("lldb", "work", [], None)],
+        )
 
     def test_debug_snapshot_collects_requested_global_variables(self):
         runner = StubRunner()
-        runner._main_return_line = Mock(return_value=10)
         runner._debuggers = Mock(return_value=["gdb"])
         runner._run_debugger = Mock(
             return_value=subprocess.CompletedProcess(
@@ -212,7 +256,7 @@ rax = 0x2
 
         self.assertEqual(snapshot["variables"], {"sum": "2"})
         self.assertEqual(snapshot["registers"], {"rax": "0x2"})
-        runner._run_debugger.assert_called_once_with("gdb", 10, [], ["sum"])
+        runner._run_debugger.assert_called_once_with("gdb", "main", [], ["sum"])
 
     @patch("src.campaign_runner.subprocess.run")
     def test_gdb_command_prints_requested_global_variables(self, run_process):
@@ -221,11 +265,12 @@ rax = 0x2
         runner.exe = "/tmp/program"
         runner.src = "main.c"
 
-        runner._run_debugger("gdb", 10, [], ["sum"])
+        runner._run_debugger("gdb", "work", [], ["sum"])
 
         kwargs = run_process.call_args.kwargs
         self.assertIn("env", kwargs)
         self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
+        self.assertEqual(kwargs["env"]["TARGET_FUNC"], "work")
 
     @patch("src.campaign_runner.subprocess.run")
     def test_lldb_command_prints_requested_global_variables(self, run_process):
@@ -234,26 +279,30 @@ rax = 0x2
         runner.exe = "/tmp/program"
         runner.src = "main.c"
 
-        runner._run_debugger("lldb", 10, [], ["sum"])
+        runner._run_debugger("lldb", "work", [], ["sum"])
 
         kwargs = run_process.call_args.kwargs
         self.assertIn("env", kwargs)
         self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
+        self.assertEqual(kwargs["env"]["TARGET_FUNC"], "work")
 
     def test_debugger_rejects_invalid_variable_names(self):
         with self.assertRaisesRegex(ValueError, "bad-name"):
-            StubRunner()._run_debugger("gdb", 1, [], ["bad-name"])
+            StubRunner()._run_debugger("gdb", "main", [], ["bad-name"])
+
+    def test_debugger_rejects_invalid_function_names(self):
+        with self.assertRaisesRegex(ValueError, "bad-name"):
+            StubRunner()._run_debugger("gdb", "bad-name", [])
 
     def test_debug_snapshot_reports_when_no_debugger_is_available(self):
         runner = StubRunner()
-        runner._main_return_line = Mock(return_value=1)
         runner._debuggers = Mock(return_value=[])
         with self.assertRaisesRegex(RuntimeError, "Neither gdb nor lldb"):
             runner._debug_snapshot([])
 
     def test_debugger_command_rejects_unknown_debugger(self):
         with self.assertRaisesRegex(ValueError, "Unsupported debugger"):
-            StubRunner()._run_debugger("unknown", 1, [])
+            StubRunner()._run_debugger("unknown", "main", [])
 
     @patch("src.campaign_runner.subprocess.run")
     def test_debugger_command_accepts_custom_debugger_paths(self, run_process):
@@ -262,7 +311,7 @@ rax = 0x2
         runner.exe = "/tmp/program"
         runner.src = "main.c"
         
-        runner._run_debugger("/opt/custom/gdb-multiarch", 10, [])
+        runner._run_debugger("/opt/custom/gdb-multiarch", "main", [])
         command = run_process.call_args.args[0]
         self.assertEqual(command[0], "/opt/custom/gdb-multiarch")
 
@@ -479,12 +528,12 @@ class CampaignRunTest(unittest.TestCase):
             lambda programs, flags: order.append("aspis compile")
         )
         oracle_class.return_value.execute.side_effect = (
-            lambda args, variables, repetitions: (
+            lambda args, variables, repetitions, functions: (
                 order.append("oracle execute") or oracle_results
             )
         )
         aspis_class.return_value.execute.side_effect = (
-            lambda args, variables, repetitions: (
+            lambda args, variables, repetitions, functions: (
                 order.append("aspis execute") or aspis_results
             )
         )
@@ -508,7 +557,7 @@ class CampaignRunTest(unittest.TestCase):
             ["main.c", "helper.cpp"], ["-lm"]
         )
         oracle_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"], 5
+            ["a", "b"], ["x"], 5, ["main"]
         )
         aspis_class.assert_called_once_with(
             environment,
@@ -520,7 +569,7 @@ class CampaignRunTest(unittest.TestCase):
             ["main.c", "helper.cpp"], ["-lm"]
         )
         aspis_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"], 5
+            ["a", "b"], ["x"], 5, ["main"]
         )
         self.assertEqual(
             order,
@@ -536,7 +585,7 @@ class CampaignRunTest(unittest.TestCase):
         )
         self.assertEqual(written_log, "\n".join(log))
 
-    @patch("src.campaign_runner.RegisterInjector")
+    @patch("src.injector.RegisterInjector")
     @patch("src.campaign_runner.AspisRunner")
     @patch("src.campaign_runner.OracleRunner")
     def test_runs_injector_and_logs_execution_results(
@@ -585,7 +634,7 @@ class CampaignRunTest(unittest.TestCase):
             2,
         )
 
-    @patch("src.campaign_runner.RegisterInjector")
+    @patch("src.injector.RegisterInjector")
     @patch("src.campaign_runner.AspisRunner")
     @patch("src.campaign_runner.OracleRunner")
     def test_runs_injector_concurrently(
@@ -656,7 +705,7 @@ class CampaignRunTest(unittest.TestCase):
 
         oracle_class.return_value.compile.assert_called_once_with([str(source)], [])
         oracle_class.return_value.execute.assert_called_once_with(
-            ["first", "second"], ["x"], 1
+            ["first", "second"], ["x"], 1, ["main"]
         )
 
     def test_skips_run_without_supported_entry_source(self):

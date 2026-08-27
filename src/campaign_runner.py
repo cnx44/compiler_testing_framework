@@ -12,9 +12,9 @@ import subprocess
 import tempfile
 import time
 
-from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode, RegisterInjection, MemoryInjection, GlobalInjection
+from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
 from src.env import Environment
-from src.injector import BaseInjector, RegisterInjector, MemoryInjector, GlobalInjector
+from src.injector import BaseInjector
 
 
 class ProgramRunner(ABC):
@@ -63,6 +63,7 @@ class ProgramRunner(ABC):
         args: list[str] | None = None,
         variables_to_check: list[str] | None = None,
         execution_repetitions: int = 1,
+        functions_to_check: list[str] | None = None,
     ):
         """Execute an already compiled binary and collect its observable state."""
         if self._build_dir is None or not Path(self.exe).is_file():
@@ -101,7 +102,25 @@ class ProgramRunner(ABC):
             "execution_repetitions": execution_repetitions,
             "binary_size_bytes": self.size,
         }
-        self.results.update(self._debug_snapshot(args, variables_to_check))
+        function_names = list(dict.fromkeys(functions_to_check or ["main"]))
+        snapshots = {
+            function_name: self._debug_snapshot(
+                args, variables_to_check, function_name
+            )
+            for function_name in function_names
+        }
+        variables = {}
+        registers = {}
+        for snapshot in snapshots.values():
+            variables.update(snapshot["variables"])
+            registers.update(snapshot["registers"])
+        self.results.update(
+            {
+                "variables": variables,
+                "registers": registers,
+                "snapshots": snapshots,
+            }
+        )
         return self.results
 
     def run(
@@ -111,12 +130,16 @@ class ProgramRunner(ABC):
         compiler_flags: list[str] | None = None,
         variables_to_check: list[str] | None = None,
         execution_repetitions: int = 1,
+        functions_to_check: list[str] | None = None,
     ):
         """Compile and execute a program, cleaning temporary artifacts afterwards."""
         try:
             self.compile(programs, compiler_flags)
             return self.execute(
-                args, variables_to_check, execution_repetitions
+                args,
+                variables_to_check,
+                execution_repetitions,
+                functions_to_check,
             )
         finally:
             self.cleanup()
@@ -142,12 +165,13 @@ class ProgramRunner(ABC):
         self,
         args: list[str],
         variables_to_check: list[str] | None = None,
+        target_function: str = "main",
     ):
-        return_line = self._main_return_line()
+        target_function = self._debug_function_name(target_function)
         errors = []
         for debugger in self._debuggers():
             debug_result = self._run_debugger(
-                debugger, return_line, args, variables_to_check
+                debugger, target_function, args, variables_to_check
             )
             if debug_result.returncode != 0:
                 errors.append(f"{debugger}: {debug_result.stderr.strip()}")
@@ -189,11 +213,12 @@ class ProgramRunner(ABC):
     def _run_debugger(
         self,
         debugger: str,
-        return_line: int,
+        target_function: str,
         args: list[str],
         variables_to_check: list[str] | None = None,
     ):
         variable_names = self._debug_variable_names(variables_to_check or [])
+        target_function = self._debug_function_name(target_function)
         debugger_name = Path(debugger).name.lower()
         if "gdb" in debugger_name:
             flavor = "gdb"
@@ -204,7 +229,7 @@ class ProgramRunner(ABC):
         
         run_env = os.environ.copy()
         run_env["TARGET_SRC"] = str(self.src)
-        run_env["RETURN_LINE"] = str(return_line)
+        run_env["TARGET_FUNC"] = target_function
         run_env["VARS_TO_CHECK"] = ",".join(variable_names)
         
         base_dir = Path(__file__).parent / "gdb_scripts"
@@ -236,6 +261,11 @@ class ProgramRunner(ABC):
                 f"Invalid debugger variable name(s): {', '.join(invalid)}"
             )
         return variable_names
+
+    def _debug_function_name(self, function_name: str):
+        if re.fullmatch(r"[A-Za-z_]\w*", function_name) is None:
+            raise ValueError(f"Invalid debugger function name: {function_name}")
+        return function_name
 
     def _parse_debug_variables(self, output: str, start: str, end: str):
         section = self._section(output, start, end)
@@ -272,27 +302,6 @@ class ProgramRunner(ABC):
         if self._build_dir is not None:
             self._build_dir.cleanup()
             self._build_dir = None
-
-    def _main_return_line(self):
-        gdb_scripts_dir = str(Path(__file__).parent.resolve() / "gdb_scripts")
-        script = (
-            f"python import sys; sys.path.append('{gdb_scripts_dir}'); "
-            "import gdb_utils; "
-            "print('MAX_LINE=' + str(gdb_utils.get_end_line('main')))"
-        )
-        result = subprocess.run(
-            [self.environment.gdb_executable, "--batch", "-q", self.exe, "-ex", script],
-            capture_output=True,
-            text=True,
-        )
-        for line in result.stdout.splitlines():
-            if line.startswith("MAX_LINE="):
-                max_line = int(line.split("=", 1)[1])
-                if max_line != -1:
-                    return max_line
-                break
-        raise RuntimeError(f"Could not determine main return line via GDB DWARF symbols.\n{result.stderr}")
-
 
 class OracleRunner(ProgramRunner):
     """Runs the unprotected reference program with the vanilla compiler."""
@@ -476,7 +485,10 @@ class CampaignRun:
             )
 
             try:
-                vars_to_check = [var.name for tf in run.functions for var in tf.variables]
+                vars_to_check = [
+                    var.name for tf in run.functions for var in tf.variables
+                ]
+                functions_to_check = [tf.name for tf in run.functions]
 
                 # Build both variants before executing either one. This keeps the
                 # selected ASPIS protection modes tied to this campaign run.
@@ -484,10 +496,16 @@ class CampaignRun:
                 aspis_runner.compile(run.programs, run.compiler_flags)
 
                 oracle_results = oracle_runner.execute(
-                    run_args, vars_to_check, run.execution_repetitions
+                    run_args,
+                    vars_to_check,
+                    run.execution_repetitions,
+                    functions_to_check,
                 )
                 aspis_results = aspis_runner.execute(
-                    run_args, vars_to_check, run.execution_repetitions
+                    run_args,
+                    vars_to_check,
+                    run.execution_repetitions,
+                    functions_to_check,
                 )
                 differences = self._measurement_differences(
                     oracle_results, aspis_results
@@ -506,51 +524,16 @@ class CampaignRun:
                                 self.log.append(f"Injection error: {e}")
 
                 for target_function in run.functions:
-                    if isinstance(run.injection, RegisterInjection):
-                        injector: BaseInjector = RegisterInjector(
-                            self.environment,
-                            aspis_runner.exe,
-                            entry_source,
-                            target_function.name,
-                            data_only=run.injection.data_only,
-                            debugger=self.debugger,
-                            timeout_ms=run.timeout_ms
-                        )
-                        _run_inj(injector)
-                    elif isinstance(run.injection, MemoryInjection):
-                        if not target_function.variables:
-                            injector = MemoryInjector(
-                                self.environment,
-                                aspis_runner.exe,
-                                entry_source,
-                                target_function.name,
-                                debugger=self.debugger,
-                                timeout_ms=run.timeout_ms
-                            )
-                            _run_inj(injector)
-                        else:
-                            for var in target_function.variables:
-                                injector = MemoryInjector(
-                                    self.environment,
-                                    aspis_runner.exe,
-                                    entry_source,
-                                    target_function.name,
-                                    payload_ptr=var.name,
-                                    length_var=str(var.length) if var.length else "",
-                                    debugger=self.debugger,
-                                    timeout_ms=run.timeout_ms
-                                )
-                                _run_inj(injector)
-                    elif isinstance(run.injection, GlobalInjection):
-                        injector = GlobalInjector(
-                            self.environment,
-                            aspis_runner.exe,
-                            entry_source,
-                            target_function.name,
-                            target_global=run.injection.target_global,
-                            debugger=self.debugger,
-                            timeout_ms=run.timeout_ms
-                        )
+                    injectors = BaseInjector.create_for_target(
+                        run.injection,
+                        self.environment,
+                        aspis_runner.exe,
+                        entry_source,
+                        target_function,
+                        debugger=self.debugger,
+                        timeout_ms=run.timeout_ms,
+                    )
+                    for injector in injectors:
                         _run_inj(injector)
 
                 self.results.append(

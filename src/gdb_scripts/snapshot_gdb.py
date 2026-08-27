@@ -2,20 +2,18 @@ import gdb
 import os
 import sys
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from gdb_utils import continue_to_function_return, run_to_function
+
+
 def main():
-    target_src = os.environ.get("TARGET_SRC")
-    return_line = os.environ.get("RETURN_LINE")
+    target_func = os.environ.get("TARGET_FUNC", "main")
     vars_to_check_str = os.environ.get("VARS_TO_CHECK", "")
-    
-    if not target_src or not return_line:
-        print("Error: TARGET_SRC and RETURN_LINE environment variables are required.")
-        sys.exit(1)
 
     vars_to_check = [v.strip() for v in vars_to_check_str.split(",") if v.strip()]
 
-    # Set breakpoint and run
-    gdb.execute(f"break {target_src}:{return_line}")
-    gdb.execute("run")
+    run_to_function(target_func)
+    continue_to_function_return(target_func)
 
     # Extract snapshot data
     gdb.execute('printf "@@ARGS@@\\n"')
