@@ -511,6 +511,7 @@ class CampaignRun:
                 differences = self._measurement_differences(
                     oracle_results, aspis_results
                 )
+                injections = []
                 def _run_inj(inj):
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         futures = [
@@ -520,6 +521,7 @@ class CampaignRun:
                         for future in concurrent.futures.as_completed(futures):
                             try:
                                 result = future.result()
+                                injections.append(result)
                                 self.log.append(f"Injection result: {result}")
                             except Exception as e:
                                 self.log.append(f"Injection error: {e}")
@@ -537,14 +539,69 @@ class CampaignRun:
                     for injector in injectors:
                         _run_inj(injector)
 
+                # Classify injection results
+                from src.models import TerminationEvent
+                injection_summary = {
+                    "total": len(injections),
+                    "masked": 0,
+                    "sdc": 0,
+                    "timeout": 0,
+                    "crash": 0,
+                    "aspis_data": 0,
+                    "aspis_cf": 0,
+                    "sdc_states": []
+                }
+                
+                oracle_vars = oracle_results.get("variables", {})
+                for inj_result in injections:
+                    event = inj_result.event
+                    if event == TerminationEvent.TIMEOUT:
+                        injection_summary["timeout"] += 1
+                    elif event == TerminationEvent.CRASHED or event == TerminationEvent.INTERNAL_ERROR:
+                        injection_summary["crash"] += 1
+                    elif event == TerminationEvent.ASPIS_DATA:
+                        injection_summary["aspis_data"] += 1
+                    elif event == TerminationEvent.ASPIS_CF:
+                        injection_summary["aspis_cf"] += 1
+                    elif event == TerminationEvent.RETURNED:
+                        # Check if state matches oracle
+                        state = inj_result.state
+                        is_sdc = False
+                        if state.stdout != oracle_results.get("stdout", ""):
+                            is_sdc = True
+                        elif state.stderr != oracle_results.get("stderr", ""):
+                            is_sdc = True
+                        else:
+                            for var_name in vars_to_check:
+                                if state.variables.get(var_name) != oracle_vars.get(var_name):
+                                    is_sdc = True
+                                    break
+                        if is_sdc:
+                            injection_summary["sdc"] += 1
+                            # Save state as dict
+                            from dataclasses import asdict
+                            injection_summary["sdc_states"].append(asdict(state))
+                        else:
+                            injection_summary["masked"] += 1
+
                 self.results.append(
                     {
                         "name": run.name,
                         "oracle": oracle_results,
                         "aspis": aspis_results,
                         "difference": differences,
+                        "injections": injection_summary,
                     }
                 )
+
+                # Save results to JSON
+                import json
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                json_path = self.log_path.with_name(f"campaign_summary_{timestamp}.json")
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(self.results, f, indent=2)
+
                 self.log.extend(
                     self._comparison_lines(oracle_results, aspis_results, vars_to_check)
                 )

@@ -67,6 +67,7 @@ class AspisTui:
             "Esegui test",
             "Crea configurazione",
             "Configura toolchain",
+            "Visualizza risultati campagna",
             "Esci",
         ]
         while True:
@@ -80,7 +81,7 @@ class AspisTui:
                 self._write(8 + index * 2, 5, f"{marker} {label}", attr)
             key = self._key()
             if key in (ord("q"), 27) or (
-                key in (curses.KEY_ENTER, 10, 13) and choice == 3
+                key in (curses.KEY_ENTER, 10, 13) and choice == 4
             ):
                 return
             if key == curses.KEY_UP:
@@ -94,6 +95,8 @@ class AspisTui:
                     self._create_configuration()
                 elif choice == 2:
                     self._configure_toolchain()
+                elif choice == 3:
+                    self._view_campaign_results()
 
     def _configure_toolchain(self) -> None:
         values = {
@@ -200,7 +203,7 @@ class AspisTui:
         except Exception as error:
             self._message("Esecuzione interrotta", str(error), error=True)
             return
-        self._results(config, runner.results, runner.log)
+        self._campaign_summary(config.name, runner.results)
 
     def _results(self, config: Path, results: list[dict], log: list[str]) -> None:
         if not results:
@@ -223,6 +226,136 @@ class AspisTui:
                 selected = (selected + 1) % len(results)
             elif key in (ord("l"), ord("L")):
                 self._paged_text("ASPIS · Log", log, "↑↓ scorri · Esc torna ai risultati")
+
+    def _view_campaign_results(self) -> None:
+        result_file = self._file_picker("Seleziona i risultati della campagna (.json)", suffixes={".json"})
+        if result_file is None:
+            return
+        try:
+            results = json.loads(result_file.read_text(encoding="utf-8"))
+        except Exception as error:
+            self._message("Errore", f"Impossibile leggere il file: {error}", error=True)
+            return
+        self._campaign_summary(result_file.name, results)
+
+    def _campaign_summary(self, name: str, results: list[dict]) -> None:
+        if not results:
+            self._message("Nessun risultato", "La campagna non contiene risultati.")
+            return
+        selected = 0
+        while True:
+            result = results[selected]
+            injections = result.get("injections", {})
+            total = injections.get("total", 0)
+            
+            def pct(count):
+                if total == 0: return "0%"
+                return f"{(count / total) * 100:.1f}%"
+
+            lines = [
+                f"CAMPAGNA: {name} - TEST: {result['name']} ({selected + 1}/{len(results)})",
+                "",
+                "CONFIGURAZIONE & OVERHEADS",
+            ]
+            
+            diff = result.get("difference", {})
+            for field, label in [("binary_size_bytes", "Dimensione binario"), ("execution_time_seconds", "Tempo esecuzione")]:
+                delta = diff.get(field, {})
+                percent = delta.get("percent")
+                percent_str = "n/d" if percent is None else f"{percent:+.2f}%"
+                lines.append(f"  {label:25}: {percent_str}")
+            
+            lines.extend([
+                "",
+                "RISULTATI INJECTION",
+                f"  Injections Totali         : {total}",
+                f"  Masked                    : {injections.get('masked', 0):<5} ({pct(injections.get('masked', 0))})",
+                f"  SDC (Silent Data Corrupt) : {injections.get('sdc', 0):<5} ({pct(injections.get('sdc', 0))})",
+                f"  Timeouts (Loop infinito)  : {injections.get('timeout', 0):<5} ({pct(injections.get('timeout', 0))})",
+                f"  Crashes (HW, Segfault)    : {injections.get('crash', 0):<5} ({pct(injections.get('crash', 0))})",
+                f"  ASPIS Data (Rilevati)     : {injections.get('aspis_data', 0):<5} ({pct(injections.get('aspis_data', 0))})",
+                f"  ASPIS CF (Rilevati)       : {injections.get('aspis_cf', 0):<5} ({pct(injections.get('aspis_cf', 0))})",
+            ])
+
+            footer = "←→ cambia test · s ispeziona SDC · Esc torna indietro"
+            self._frame("ASPIS · Sommario Campagna", footer)
+            for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
+                self._write(row, 3, line)
+            
+            key = self._key()
+            if key in (27, ord("q")):
+                return
+            if key == curses.KEY_LEFT:
+                selected = (selected - 1) % len(results)
+            elif key == curses.KEY_RIGHT:
+                selected = (selected + 1) % len(results)
+            elif key in (ord("s"), ord("S")):
+                self._sdc_inspector(name, result)
+
+    def _sdc_inspector(self, name: str, result: dict) -> None:
+        sdc_states = result.get("injections", {}).get("sdc_states", [])
+        if not sdc_states:
+            self._message("Nessun SDC", "Non ci sono Silent Data Corruptions da ispezionare per questo test.")
+            return
+
+        oracle = result.get("oracle", {})
+        selected = 0
+        while True:
+            state = sdc_states[selected]
+            lines = [
+                f"ISPEZIONE SDC ({selected + 1}/{len(sdc_states)}) - Test: {result['name']}",
+                "",
+                "DIFFERENZE RISPETTO ALL'ORACLE:",
+            ]
+            
+            # STDOUT
+            if state.get("stdout") != oracle.get("stdout"):
+                lines.extend([
+                    "--- STDOUT ---",
+                    f"- ORACLE: {oracle.get('stdout', '')!r}",
+                    f"+ ASPIS:  {state.get('stdout', '')!r}",
+                    ""
+                ])
+                
+            # STDERR
+            if state.get("stderr") != oracle.get("stderr"):
+                lines.extend([
+                    "--- STDERR ---",
+                    f"- ORACLE: {oracle.get('stderr', '')!r}",
+                    f"+ ASPIS:  {state.get('stderr', '')!r}",
+                    ""
+                ])
+                
+            # VARIABLES
+            oracle_vars = oracle.get("variables", {})
+            aspis_vars = state.get("variables", {})
+            all_vars = sorted(set(oracle_vars) | set(aspis_vars))
+            var_lines = []
+            for var in all_vars:
+                if oracle_vars.get(var) != aspis_vars.get(var):
+                    var_lines.append(f"  {var}: ORACLE={oracle_vars.get(var, '<missing>')} ASPIS={aspis_vars.get(var, '<missing>')}")
+            if var_lines:
+                lines.append("--- VARIABILI ---")
+                lines.extend(var_lines)
+                lines.append("")
+
+            footer = "←→ scorri SDC · Esc torna al sommario"
+            self._frame("ASPIS · SDC Inspector", footer)
+            for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
+                if line.startswith("- "):
+                    self._write(row, 3, line, curses.color_pair(3))
+                elif line.startswith("+ "):
+                    self._write(row, 3, line, curses.color_pair(2))
+                else:
+                    self._write(row, 3, line)
+
+            key = self._key()
+            if key in (27, ord("q")):
+                return
+            if key == curses.KEY_LEFT:
+                selected = (selected - 1) % len(sdc_states)
+            elif key == curses.KEY_RIGHT:
+                selected = (selected + 1) % len(sdc_states)
 
     def _create_configuration(self) -> None:
         name = self._ask_text("Nome del test", "test")
