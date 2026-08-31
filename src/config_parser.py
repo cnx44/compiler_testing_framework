@@ -159,7 +159,7 @@ class RunnerConfigTransformer(Transformer):
               control_flow_protection=values[3],
               compiler_flags=optional.get("compiler_flags", []),
               execution_repetitions=optional.get("execution_repetitions", 1),
-              functions=optional.get("functions", []),
+              functions=optional.get("functions", [TargetFunction(name="main")]),
               injection=optional.get("injection", RegisterInjection()),
               timeout_ms=optional.get("timeout_ms", 5000),
           )
