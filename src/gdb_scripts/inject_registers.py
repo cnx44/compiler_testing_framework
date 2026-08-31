@@ -44,9 +44,10 @@ def inject_smart_register():
         gdb.execute("start")
         gdb.execute("delete")
 
-        bp = gdb.Breakpoint(target_func)
-        gdb.execute("continue")
-        bp.delete()
+        if gdb.newest_frame().name() != target_func:
+            bp = gdb.Breakpoint(target_func)
+            gdb.execute("continue")
+            bp.delete()
 
         steps = random.randint(1, max_steps)
         gdb.execute(f"nexti {steps}", to_string=True)

@@ -21,9 +21,10 @@ def profile():
         gdb.execute(f"set args > {out_file}")
         gdb.execute("start")
         gdb.execute("delete")
-        gdb.execute(f"break {target_func}")
-        gdb.execute("continue")
-        gdb.execute("delete")
+        if gdb.newest_frame().name() != target_func:
+            gdb.execute(f"break {target_func}")
+            gdb.execute("continue")
+            gdb.execute("delete")
 
         # --- Phase A: Extract Exact Used Registers ---
         used_regs = set()
@@ -44,14 +45,16 @@ def profile():
         # --- Phase B: Count Steps ---
         max_steps = 0
         while True:
-            frame = gdb.newest_frame()
-            
-            if frame.name() != target_func:
-                break
+            try:
+                frame = gdb.newest_frame()
+                if frame.name() != target_func:
+                    break
                 
-            # Use nexti to step OVER function calls, staying in the target scope
-            gdb.execute("nexti", to_string=True)
-            max_steps += 1
+                # Use nexti to step OVER function calls, staying in the target scope
+                gdb.execute("nexti", to_string=True)
+                max_steps += 1
+            except gdb.error:
+                break
 
         # Output both metrics
         print(f"PROFILED_STEPS={max_steps}")

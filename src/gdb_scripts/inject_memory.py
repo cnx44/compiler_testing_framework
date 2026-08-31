@@ -33,9 +33,10 @@ def inject_diagnostic_memory():
     gdb.execute("delete")
 
     # Stop at Instruction 0 to cleanly read the function arguments
-    bp = gdb.Breakpoint(target_func)
-    gdb.execute("continue")
-    bp.delete()
+    if gdb.newest_frame().name() != target_func:
+        bp = gdb.Breakpoint(target_func)
+        gdb.execute("continue")
+        bp.delete()
 
     target_address = None
     strategy_used = "UNKNOWN"

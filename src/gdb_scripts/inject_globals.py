@@ -69,9 +69,10 @@ def inject_global():
     gdb.execute("start")
     gdb.execute("delete")
 
-    bp = gdb.Breakpoint(target_func)
-    gdb.execute("continue")
-    bp.delete()
+    if gdb.newest_frame().name() != target_func:
+        bp = gdb.Breakpoint(target_func)
+        gdb.execute("continue")
+        bp.delete()
 
     steps = random.randint(1, max_steps)
     print(f"[DIAG] Stepping forward {steps} instructions...")
