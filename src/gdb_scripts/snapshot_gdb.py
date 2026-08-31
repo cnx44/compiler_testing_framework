@@ -13,7 +13,15 @@ def main():
     vars_to_check = [v.strip() for v in vars_to_check_str.split(",") if v.strip()]
 
     run_to_function(target_func)
-    continue_to_function_return(target_func)
+    try:
+        continue_to_function_return(target_func)
+    except gdb.error as e:
+        print(f"Program received signal: {e}")
+
+    try:
+        gdb.execute('call (int)fflush(0)')
+    except gdb.error:
+        pass
 
     # Extract snapshot data
     gdb.execute('printf "@@ARGS@@\\n"')

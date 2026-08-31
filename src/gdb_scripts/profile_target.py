@@ -8,6 +8,32 @@ gdb.execute("set confirm off")
 gdb.execute("set verbose off")
 
 
+def get_end_line(entry_func: str) -> int:
+    try:
+        sym = gdb.lookup_global_symbol(entry_func)
+        if sym is None and hasattr(gdb, "lookup_static_symbol"):
+            sym = gdb.lookup_static_symbol(entry_func)
+        
+        if sym and sym.value():
+            start_pc = int(sym.value().address)
+            # Find the end of the function block
+            block = gdb.block_for_pc(start_pc)
+            while block and not block.function:
+                block = block.superblock
+            if not block:
+                return -1
+            end_pc = block.end
+            
+            lines = set()
+            if sym.symtab:
+                for entry in sym.symtab.linetable():
+                    if start_pc <= entry.pc < end_pc:
+                        lines.add(entry.line)
+            if lines:
+                return max(lines)
+    except Exception:
+        pass
+    return -1
 
 def profile():
     try:
@@ -44,10 +70,15 @@ def profile():
 
         # --- Phase B: Count Steps ---
         max_steps = 0
+        return_line = get_end_line(target_func)
         while True:
             try:
                 frame = gdb.newest_frame()
                 if frame.name() != target_func:
+                    break
+                
+                sal = frame.find_sal()
+                if sal and sal.line == return_line:
                     break
                 
                 # Use nexti to step OVER function calls, staying in the target scope
@@ -56,8 +87,9 @@ def profile():
             except gdb.error:
                 break
 
-        # Output both metrics
-        print(f"PROFILED_STEPS={max_steps}")
+        # Ensure max_steps is at least 0, but subtract 1 to avoid stepping onto the return line
+        safe_steps = max(0, max_steps - 1)
+        print(f"PROFILED_STEPS={safe_steps}")
         print(f"PROFILED_REGS={regs_str}")
         
     except Exception as e:

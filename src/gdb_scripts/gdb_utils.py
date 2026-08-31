@@ -51,8 +51,13 @@ def continue_and_dump_state():
 
     try:
         continue_to_function_return(entry_func)
+    except gdb.error as e:
+        print(f"Program received signal: {e}") # Print the error so the injector can classify it as a CRASH
+
+    try:
+        gdb.execute('call (int)fflush(0)')
     except gdb.error:
-        pass # Continue to dump state even if it crashes
+        pass
         
     try:
         gdb.execute('printf "@@ARGS@@\\n"')

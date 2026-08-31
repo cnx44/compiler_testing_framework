@@ -186,6 +186,7 @@ class BaseInjector(ABC):
                 capture_output=True,
                 text=True,
                 env=env,
+                stdin=subprocess.DEVNULL,
             )
 
             profile_data = {}
@@ -241,6 +242,7 @@ class BaseInjector(ABC):
                     text=True,
                     env=run_env,
                     timeout=self.timeout_ms / 1000.0,
+                    stdin=subprocess.DEVNULL,
                 )
                 exit_code = process.returncode
                 stdout = process.stdout
@@ -261,9 +263,15 @@ class BaseInjector(ABC):
             inferior_out.unlink(missing_ok=True)
             raise RuntimeError("Debugger execution failed:\n" + "\n".join(errors))
 
-        # Determine the event type based on GDB output and exit code
+        # Determine the event type based on GDB output, inferior output, and exit code
         event = TerminationEvent.RETURNED
-        combined_out = stdout + stderr
+        
+        try:
+            inf_out = inferior_out.read_text(encoding="utf-8", errors="replace")
+        except:
+            inf_out = ""
+            
+        combined_out = stdout + stderr + inf_out
         
         if exit_code == 124:
             event = TerminationEvent.TIMEOUT
@@ -277,6 +285,8 @@ class BaseInjector(ABC):
             or "stop reason = signal" in combined_out
         ):
             event = TerminationEvent.CRASHED
+        elif "[FATAL]" in combined_out or "Uncaught Exception" in combined_out:
+            event = TerminationEvent.INTERNAL_ERROR
 
         # Extract the internal state
         state = self._extract_state(stdout, stderr, inferior_out)

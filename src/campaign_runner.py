@@ -80,6 +80,7 @@ class ProgramRunner(ABC):
                 [self._exe_command(), *args],
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             execution_times.append(time.perf_counter() - started_at)
 
@@ -248,7 +249,7 @@ class ProgramRunner(ABC):
                 "-o", f"command script import {script}"
             ]
             
-        return subprocess.run(command, capture_output=True, text=True, env=run_env)
+        return subprocess.run(command, capture_output=True, text=True, env=run_env, stdin=subprocess.DEVNULL)
 
     def _debug_variable_names(self, variable_names: list[str]):
         invalid = [
