@@ -366,6 +366,12 @@ class AspisRunner(ProgramRunner):
         command.extend(self._aspis_mode_args())
         command.extend(self.environment.aspis_flags)
         command.extend(str(source.resolve()) for source in sources)
+        
+        # Automatically inject default fault handlers so the user doesn't have to write them
+        handlers_path = Path(__file__).parent / "aspis_handlers.c"
+        if handlers_path.is_file():
+            command.append(str(handlers_path.resolve()))
+            
         command.extend(self._compiler_flags_for_build_dir(compiler_flags or []))
 
         compile_result = subprocess.run(
