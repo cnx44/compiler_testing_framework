@@ -3,3 +3,4 @@ note.md
 *.pyc
 .venv/
 .agents
+.aspis-tui.json
