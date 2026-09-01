@@ -38,9 +38,21 @@ def inject_register(debugger):
         raise ValueError(f"Register '{name}' is unavailable.")
     bits = max(register.GetByteSize() * 8, 1)
     bit = random.randint(0, bits - 1)
-    new_value = register.GetValueAsUnsigned() ^ (1 << bit)
+    
     error = lldb.SBError()
-    if not register.SetValueFromCString(str(new_value), error) or error.Fail():
+    data = register.GetData()
+    raw = bytearray(data.ReadRawData(error, 0, register.GetByteSize()))
+    if error.Fail():
+        raise RuntimeError(f"Could not read register '{name}': {error.GetCString()}")
+        
+    byte_idx = bit // 8
+    bit_idx = bit % 8
+    raw[byte_idx] ^= (1 << bit_idx)
+    
+    new_data = lldb.SBData()
+    new_data.SetData(error, raw, data.GetByteOrder(), data.GetAddressByteSize())
+    register.SetData(new_data, error)
+    if error.Fail():
         raise RuntimeError(error.GetCString() or f"Could not write register '{name}'.")
     print(f"[*] Injected fault into {name} (Size: {bits}-bit), flipped bit {bit}")
     continue_and_dump_state(debugger, target, process)

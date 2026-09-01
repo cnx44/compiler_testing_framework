@@ -86,7 +86,8 @@ def get_arch_config():
                 "rsp", "esp", "sp", "spl",
                 "rbp", "ebp", "bp", "bpl",
                 "rdi", "edi", "di", "dil",
-                "rsi", "esi", "si", "sil"
+                "rsi", "esi", "si", "sil",
+                "rip", "eip", "ip"
             },
             "safe_regs_fallback": ["eax", "edx", "ecx"]
         }
@@ -94,21 +95,21 @@ def get_arch_config():
         return {
             "arg1_reg": "x0",
             "arg3_reg": "x2",
-            "pointer_blacklist": {"sp", "wsp", "x29", "w29", "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"},
+            "pointer_blacklist": {"sp", "wsp", "x29", "w29", "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "pc", "lr", "x30"},
             "safe_regs_fallback": ["x8", "x9", "x10"]
         }
     elif "arm" in arch_name:
         return {
             "arg1_reg": "r0",
             "arg3_reg": "r2",
-            "pointer_blacklist": {"sp", "r13", "fp", "r11", "r0", "r1", "r2", "r3"},
+            "pointer_blacklist": {"sp", "r13", "fp", "r11", "r0", "r1", "r2", "r3", "pc", "r15", "lr", "r14"},
             "safe_regs_fallback": ["r4", "r5", "r6"]
         }
     elif "riscv" in arch_name:
         return {
             "arg1_reg": "a0",
             "arg3_reg": "a2",
-            "pointer_blacklist": {"sp", "s0", "fp", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"},
+            "pointer_blacklist": {"sp", "s0", "fp", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "pc", "ra"},
             "safe_regs_fallback": ["t0", "t1", "t2"]
         }
     else:

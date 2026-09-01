@@ -68,13 +68,33 @@ def inject_smart_register():
 
         max_bit = get_max_bit(target)
 
-        val = int(gdb.parse_and_eval(f"(unsigned long long)${target}"))
-        
         # Inject strictly within the architectural boundaries
         bit = random.randint(0, max_bit)
-        new_val = val ^ (1 << bit)
+        
+        try:
+            val = int(gdb.parse_and_eval(f"(unsigned long long)${target}"))
+            new_val = val ^ (1 << bit)
+            gdb.execute(f"set ${target} = {new_val}")
+        except gdb.error:
+            # Fallback for vector/float registers (e.g. xmm)
+            byte_idx = bit // 8
+            bit_idx = bit % 8
+            val_obj = gdb.parse_and_eval(f"${target}")
+            keys = val_obj.type.keys()
+            
+            array_field = None
+            for k in ['v16_int8', 'v8_int8', 'v32_int8', 'v64_int8', 'b']:
+                if k in keys:
+                    array_field = k
+                    break
+                    
+            if array_field:
+                old_byte = int(val_obj[array_field][byte_idx])
+                new_byte = old_byte ^ (1 << bit_idx)
+                gdb.execute(f"set ${target}.{array_field}[{byte_idx}] = {new_byte}")
+            else:
+                raise Exception(f"Cannot perform byte-level injection on {target} (type keys: {keys})")
 
-        gdb.execute(f"set ${target} = {new_val}")
         print(f"[*] Injected fault into {target} (Size: {max_bit + 1}-bit), flipped bit {bit}")
 
         # Continue execution and dump the state for the Oracle to read

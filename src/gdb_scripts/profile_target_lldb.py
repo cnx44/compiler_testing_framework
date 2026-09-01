@@ -12,9 +12,6 @@ def _general_register_names(frame):
     register_sets = frame.GetRegisters()
     for set_index in range(register_sets.GetSize()):
         register_set = register_sets.GetValueAtIndex(set_index)
-        set_name = (register_set.GetName() or "").lower()
-        if "general" not in set_name:
-            continue
         for register_index in range(register_set.GetNumChildren()):
             name = register_set.GetChildAtIndex(register_index).GetName()
             if name:

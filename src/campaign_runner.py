@@ -62,7 +62,7 @@ class ProgramRunner(ABC):
         self,
         args: list[str] | None = None,
         variables_to_check: list[str] | None = None,
-        execution_repetitions: int = 1,
+        execution_repetitions: int = 100,
         functions_to_check: list[str] | None = None,
     ):
         """Execute an already compiled binary and collect its observable state."""
@@ -91,8 +91,8 @@ class ProgramRunner(ABC):
             else 0.0
         )
         self.results = {
-            "stdout": run_result.stdout,
-            "stderr": run_result.stderr,
+            "stdout": run_result.stdout.strip(),
+            "stderr": run_result.stderr.strip(),
             "returncode": run_result.returncode,
             "execution_time_seconds": mean,
             "execution_time_samples_seconds": execution_times,

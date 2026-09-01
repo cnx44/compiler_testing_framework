@@ -56,15 +56,16 @@ def profile():
         used_regs = set()
         disassembly = gdb.execute(f"disassemble {target_func}", to_string=True)
         
-        # Dynamically get valid general purpose registers for the current architecture
-        arch = gdb.selected_frame().architecture()
-        valid_regs = {reg.name for reg in arch.registers('general') if reg.name}
-        
         # Regex to find all potential words that could be registers
         matches = re.findall(r'\b([a-zA-Z0-9_]+)\b', disassembly)
         for reg in matches:
-            if reg in valid_regs:
-                used_regs.add(reg)
+            try:
+                # If GDB can evaluate it, it's a valid register or pseudo-register
+                val = gdb.parse_and_eval(f"${reg}")
+                if val.type.code != gdb.TYPE_CODE_VOID:
+                    used_regs.add(reg)
+            except gdb.error:
+                pass
 
         regs_str = ",".join(used_regs)
 

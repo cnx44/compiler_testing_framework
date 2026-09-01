@@ -379,7 +379,7 @@ class AspisTui:
         if control_mode is None:
             return
         timeout = self._ask_positive("Timeout in millisecondi", "5000")
-        repetitions = self._ask_positive("Ripetizioni dell'esecuzione", "1")
+        repetitions = self._ask_positive("Ripetizioni dell'esecuzione", "100")
         if timeout is None or repetitions is None:
             return
         compiler_flags = self._ask_text(
