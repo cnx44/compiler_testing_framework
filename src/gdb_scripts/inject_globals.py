@@ -66,6 +66,14 @@ def inject_global():
     
     out_file = os.environ.get("INFERIOR_OUT", ".inferior_out.txt")
     gdb.execute(f"set args > {out_file}")
+    # Extract candidates before start to avoid slow info variables!
+    candidates = []
+    if not target_global:
+        candidates = get_all_globals()
+        if not candidates:
+            print("[DIAG] No global variables found to inject.")
+            return
+
     gdb.execute("start")
     gdb.execute("delete")
 
@@ -88,10 +96,6 @@ def inject_global():
     if target_global:
         strategy_used = f"Explicit Target ({target_global})"
     else:
-        candidates = get_all_globals()
-        if not candidates:
-            print("[DIAG] No global variables found to inject.")
-            return
         var_name = random.choice(candidates)
         strategy_used = f"Random Global ({var_name})"
         

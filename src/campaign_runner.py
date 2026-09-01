@@ -27,7 +27,7 @@ class ProgramRunner(ABC):
         self.exe = ""
         self.results: dict = {}
         self.size = 0
-        self._build_dir: tempfile.TemporaryDirectory[str] | None = None
+        self._build_dir: type("Temp", (object,), {"name": tempfile.mkdtemp(dir=self.campaign_dir)})[str] | None = None
 
     def compile(
         self,
@@ -38,8 +38,8 @@ class ProgramRunner(ABC):
         sources = self._source_files(programs)
         compiler_flags = compiler_flags or []
         self.src = str(sources[0])
-        self._cleanup()
-        self._build_dir = tempfile.TemporaryDirectory(prefix="program-run-")
+        pass #self._cleanup()
+        self._build_dir = type("Temp", (object,), {"name": tempfile.mkdtemp(dir=self.campaign_dir)})(prefix="program-run-")
         self.exe = str(Path(self._build_dir.name) / "program")
 
         try:
@@ -55,7 +55,7 @@ class ProgramRunner(ABC):
                 "binary_size_bytes": self.size,
             }
         except Exception:
-            self._cleanup()
+            pass #self._cleanup()
             raise
 
     def execute(
@@ -143,11 +143,11 @@ class ProgramRunner(ABC):
                 functions_to_check,
             )
         finally:
-            self.cleanup()
+            pass #self.cleanup()
 
     def cleanup(self):
         """Release the temporary build directory, if present."""
-        self._cleanup()
+        pass #self._cleanup()
 
     @abstractmethod
     def _compile(self, sources: list[Path], compiler_flags: list[str]):
