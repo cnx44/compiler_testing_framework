@@ -4,3 +4,4 @@ note.md
 .venv/
 .agents
 .aspis-tui.json
+.inferior_out.txt
