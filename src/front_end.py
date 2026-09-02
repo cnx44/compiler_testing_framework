@@ -270,6 +270,7 @@ class AspisTui:
                 "RISULTATI INJECTION",
                 f"  Injections Totali         : {total}",
                 f"  Masked                    : {injections.get('masked', 0):<5} ({pct(injections.get('masked', 0))})",
+                f"  Latent (Stato discorde)   : {injections.get('latent', 0):<5} ({pct(injections.get('latent', 0))})",
                 f"  SDC (Silent Data Corrupt) : {injections.get('sdc', 0):<5} ({pct(injections.get('sdc', 0))})",
                 f"  Timeouts (Loop infinito)  : {injections.get('timeout', 0):<5} ({pct(injections.get('timeout', 0))})",
                 f"  Crashes (HW, Segfault)    : {injections.get('crash', 0):<5} ({pct(injections.get('crash', 0))})",
@@ -277,7 +278,7 @@ class AspisTui:
                 f"  ASPIS CF (Rilevati)       : {injections.get('aspis_cf', 0):<5} ({pct(injections.get('aspis_cf', 0))})",
             ])
 
-            footer = "←→ cambia test · s ispeziona SDC · Esc torna indietro"
+            footer = "←→ cambia test · s ispeziona SDC · l ispeziona Latent · Esc torna indietro"
             self._frame("ASPIS · Sommario Campagna", footer)
             for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
                 self._write(row, 3, line)
@@ -290,12 +291,14 @@ class AspisTui:
             elif key == curses.KEY_RIGHT:
                 selected = (selected + 1) % len(results)
             elif key in (ord("s"), ord("S")):
-                self._sdc_inspector(name, result)
+                self._sdc_inspector(name, result, state_key="sdc_states", title_prefix="SDC")
+            elif key in (ord("l"), ord("L")):
+                self._sdc_inspector(name, result, state_key="latent_states", title_prefix="LATENT")
 
-    def _sdc_inspector(self, name: str, result: dict) -> None:
-        sdc_states = result.get("injections", {}).get("sdc_states", [])
+    def _sdc_inspector(self, name: str, result: dict, state_key: str = "sdc_states", title_prefix: str = "SDC") -> None:
+        sdc_states = result.get("injections", {}).get(state_key, [])
         if not sdc_states:
-            self._message("Nessun SDC", "Non ci sono Silent Data Corruptions da ispezionare per questo test.")
+            self._message(f"Nessun {title_prefix}", f"Non ci sono risultati da ispezionare per questo test.")
             return
 
         oracle = result.get("oracle", {})
@@ -303,7 +306,7 @@ class AspisTui:
         while True:
             state = sdc_states[selected]
             lines = [
-                f"ISPEZIONE SDC ({selected + 1}/{len(sdc_states)}) - Test: {result['name']}",
+                f"ISPEZIONE {title_prefix} ({selected + 1}/{len(sdc_states)}) - Test: {result['name']}",
                 "",
                 "DIFFERENZE RISPETTO ALL'ORACLE:",
             ]

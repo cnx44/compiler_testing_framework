@@ -552,11 +552,13 @@ class CampaignRun:
                     "total": len(injections),
                     "masked": 0,
                     "sdc": 0,
+                    "latent": 0,
                     "timeout": 0,
                     "crash": 0,
                     "aspis_data": 0,
                     "aspis_cf": 0,
-                    "sdc_states": []
+                    "sdc_states": [],
+                    "latent_states": []
                 }
                 
                 oracle_vars = oracle_results.get("variables", {})
@@ -573,21 +575,28 @@ class CampaignRun:
                     elif event == TerminationEvent.RETURNED:
                         # Check if state matches oracle
                         state = inj_result.state
-                        is_sdc = False
+                        output_differs = False
+                        state_differs = False
+                        
                         if state.stdout != oracle_results.get("stdout", ""):
-                            is_sdc = True
+                            output_differs = True
                         elif state.stderr != oracle_results.get("stderr", ""):
-                            is_sdc = True
-                        else:
-                            for var_name in vars_to_check:
-                                if state.variables.get(var_name) != oracle_vars.get(var_name):
-                                    is_sdc = True
-                                    break
-                        if is_sdc:
+                            output_differs = True
+                            
+                        for var_name in vars_to_check:
+                            if state.variables.get(var_name) != oracle_vars.get(var_name):
+                                state_differs = True
+                                break
+                                
+                        if output_differs:
                             injection_summary["sdc"] += 1
                             # Save state as dict
                             from dataclasses import asdict
                             injection_summary["sdc_states"].append(asdict(state))
+                        elif state_differs:
+                            injection_summary["latent"] += 1
+                            from dataclasses import asdict
+                            injection_summary["latent_states"].append(asdict(state))
                         else:
                             injection_summary["masked"] += 1
 
