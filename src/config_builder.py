@@ -6,6 +6,9 @@ that the UI always writes a configuration accepted by :mod:`config_parser`.
 
 from __future__ import annotations
 
+import json
+
+from src.constants import DEFAULT_TIMEOUT_MS
 from src.config_parser import (
     Campaign,
     ControlFlowMode,
@@ -25,11 +28,11 @@ def campaign_to_text(campaign: Campaign) -> str:
 def _test_to_lines(run: RunnerTest) -> str:
     lines = [
         f"name: {run.name}",
-        f"programs: [{', '.join(run.programs)}]",
+        f"programs: [{', '.join(json.dumps(program) for program in run.programs)}]",
         f"data_protection: {_data_mode(run.data_protection)}",
         f"control_flow_protection: {_control_mode(run.control_flow_protection)}",
     ]
-    if run.timeout_ms != 5000:
+    if run.timeout_ms != DEFAULT_TIMEOUT_MS:
         lines.append(f"timeout_ms: {run.timeout_ms}")
     if run.execution_repetitions != 1:
         lines.append(f"execution_repetitions: {run.execution_repetitions}")

@@ -16,12 +16,22 @@ import re
 import shlex
 import shutil
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 from src.campaign_runner import CampaignRun
-from src.config_parser import parse_runner_config
+from src.config_builder import campaign_to_text
+from src.constants import DEFAULT_TIMEOUT_MS
+from src.config_parser import (
+    Campaign,
+    GlobalInjection,
+    MemoryInjection,
+    RegisterInjection,
+    RunnerTest,
+    parse_runner_config,
+)
 from src.env import Environment
 
 
@@ -33,6 +43,20 @@ WORD = re.compile(r"^[A-Za-z0-9_-]+$")
 TOOLCHAIN_CONFIG = ".aspis-tui.json"
 DEFAULT_ASPIS_PATH = "/mnt/misto/projects/ASPIS/aspis.sh"
 DEFAULT_LLVM_PATH = "/home/cnx/llvm-21.1.8/build/bin"
+
+
+@dataclass
+class ConfigurationDraft:
+    name: str = "test"
+    programs: list[str] = field(default_factory=list)
+    batch_directory: str = ""
+    data_mode: str = "eddi"
+    control_mode: str = "cfcss"
+    timeout: str = str(DEFAULT_TIMEOUT_MS)
+    repetitions: str = "100"
+    compiler_flags: str = ""
+    injection: str = "register data_only: false"
+    functions: str = "main"
 
 
 class AspisTui:
@@ -64,24 +88,26 @@ class AspisTui:
     def _home(self) -> None:
         choice = 0
         choices = [
-            "Esegui test",
-            "Crea configurazione",
-            "Configura toolchain",
-            "Visualizza risultati campagna",
-            "Esci",
+            "Run campaign",
+            "Create configuration",
+            "Create batch configuration",
+            "Edit configuration",
+            "Configure toolchain",
+            "View campaign results",
+            "Exit",
         ]
         while True:
-            self._frame("ASPIS · Campaign console", "↑↓ seleziona · Invio conferma · q esce")
-            self._write(3, 3, "Toolchain attiva", curses.A_BOLD)
+            self._frame("ASPIS · Campaign console", "↑↓ select · Enter confirm · q quit")
+            self._write(3, 3, "Active toolchain", curses.A_BOLD)
             self._write(4, 3, _aspis_command_preview(self.environment), curses.color_pair(2))
-            self._write(6, 3, "Scegli un'operazione", curses.A_BOLD)
+            self._write(6, 3, "Choose an action", curses.A_BOLD)
             for index, label in enumerate(choices):
                 marker = "›" if index == choice else " "
                 attr = self._selected_attr() if index == choice else 0
                 self._write(8 + index * 2, 5, f"{marker} {label}", attr)
             key = self._key()
             if key in (ord("q"), 27) or (
-                key in (curses.KEY_ENTER, 10, 13) and choice == 4
+                key in (curses.KEY_ENTER, 10, 13) and choice == 6
             ):
                 return
             if key == curses.KEY_UP:
@@ -94,8 +120,12 @@ class AspisTui:
                 elif choice == 1:
                     self._create_configuration()
                 elif choice == 2:
-                    self._configure_toolchain()
+                    self._create_configuration(batch=True)
                 elif choice == 3:
+                    self._edit_configuration()
+                elif choice == 4:
+                    self._configure_toolchain()
+                elif choice == 5:
                     self._view_campaign_results()
 
     def _configure_toolchain(self) -> None:
@@ -108,24 +138,24 @@ class AspisTui:
         }
         fields = (
             ("aspis_path", "Script ASPIS"),
-            ("llvm_path", "Directory bin LLVM"),
-            ("vanilla_compiler", "Compiler Oracle"),
+            ("llvm_path", "LLVM bin directory"),
+            ("vanilla_compiler", "Oracle compiler"),
             ("debugger", "Debugger"),
-            ("aspis_flags", "Flag ASPIS aggiuntive"),
+            ("aspis_flags", "Additional ASPIS flags"),
         )
         selected = 0
         while True:
             candidate = _environment_from_values(values)
             self._frame(
                 "ASPIS · Toolchain",
-                "↑↓ seleziona · Invio modifica/salva · Esc annulla",
+                "↑↓ select · Enter edit/save · Esc cancel",
             )
-            self._write(2, 3, "Configurazione del progetto", curses.A_BOLD)
+            self._write(2, 3, "Project settings", curses.A_BOLD)
             for index, (key, label) in enumerate(fields):
                 row = 4 + index * 2
                 attr = self._selected_attr() if selected == index else 0
                 marker = "›" if selected == index else " "
-                value = values[key] or "(non configurato)"
+                value = values[key] or "(not configured)"
                 self._write(row, 3, f"{marker} {label}", attr)
                 self._write(row + 1, 6, value, curses.color_pair(2))
             save_row = 4 + len(fields) * 2
@@ -133,10 +163,10 @@ class AspisTui:
             self._write(
                 save_row,
                 3,
-                f"{'›' if selected == len(fields) else ' '} Salva configurazione",
+                f"{'›' if selected == len(fields) else ' '} Save settings",
                 save_attr,
             )
-            self._write(save_row + 2, 3, "Comando risultante", curses.A_BOLD)
+            self._write(save_row + 2, 3, "Effective command", curses.A_BOLD)
             self._write(
                 save_row + 3,
                 3,
@@ -163,7 +193,7 @@ class AspisTui:
                             try:
                                 shlex.split(value)
                             except ValueError as error:
-                                self._message("Flag ASPIS non valide", str(error), error=True)
+                                self._message("Invalid ASPIS flags", str(error), error=True)
                                 continue
                         values[key] = value
                     continue
@@ -171,50 +201,66 @@ class AspisTui:
                 errors = _toolchain_errors(candidate)
                 if errors:
                     self._message(
-                        "Toolchain non valida", "\n".join(errors), error=True
+                        "Invalid toolchain", "\n".join(errors), error=True
                     )
                     continue
                 settings_path = self.start_dir / TOOLCHAIN_CONFIG
                 _save_toolchain(settings_path, candidate)
                 self.environment = candidate
                 self._message(
-                    "Toolchain salvata",
+                    "Toolchain settings saved",
                     f"{settings_path}\n\n{_aspis_command_preview(candidate)}",
                 )
                 return
 
     def _run_test(self) -> None:
-        config = self._file_picker("Scegli il file di configurazione")
+        config = self._file_picker(
+            "Select a configuration file", suffixes={".cfg"}
+        )
         if config is None:
             return
         try:
             campaign = parse_runner_config(config)
         except Exception as error:
-            self._message("Configurazione non valida", str(error), error=True)
+            self._message("Invalid configuration", str(error), error=True)
             return
 
-        self._frame("ASPIS · Esecuzione", "Attendi: compilazione, analisi e injection possono richiedere tempo")
-        self._write(3, 3, f"Esecuzione di {config.name}…", curses.A_BOLD)
+        self._frame(
+            "ASPIS · Running campaign",
+            "Please wait: compilation, analysis, and fault injection may take time",
+        )
+        self._write(3, 3, f"Running {config.name}…", curses.A_BOLD)
         self.screen.refresh()
         try:
             with _working_directory(config.parent):
                 runner = CampaignRun(campaign, self.environment, config.with_suffix(".log"))
                 runner.run_campaign()
         except Exception as error:
-            self._message("Esecuzione interrotta", str(error), error=True)
+            self._message("Campaign interrupted", str(error), error=True)
             return
-        self._campaign_summary(config.name, runner.results)
+        if not runner.results:
+            self._paged_text(
+                "ASPIS · Campaign failed",
+                runner.log or ["The campaign produced no results."],
+                "↑↓ scroll · Esc return to file selection",
+            )
+            return
+        self._campaign_summary(config.name, runner.results, runner.log)
 
     def _results(self, config: Path, results: list[dict], log: list[str]) -> None:
         if not results:
-            self._paged_text("ASPIS · Risultati", log or ["Nessun risultato prodotto."], "Esc torna al menu")
+            self._paged_text(
+                "ASPIS · Results",
+                log or ["The campaign produced no results."],
+                "Esc return to menu",
+            )
             return
         selected = 0
         while True:
             result = results[selected]
             lines = _result_lines(result)
-            footer = "←→ test · l log completo · Esc menu"
-            self._frame(f"ASPIS · Risultati · {config.name} ({selected + 1}/{len(results)})", footer)
+            footer = "←→ test · l full log · Esc return to menu"
+            self._frame(f"ASPIS · Results · {config.name} ({selected + 1}/{len(results)})", footer)
             for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
                 self._write(row, 3, line)
             key = self._key()
@@ -225,22 +271,26 @@ class AspisTui:
             elif key == curses.KEY_RIGHT:
                 selected = (selected + 1) % len(results)
             elif key in (ord("l"), ord("L")):
-                self._paged_text("ASPIS · Log", log, "↑↓ scorri · Esc torna ai risultati")
+                self._paged_text("ASPIS · Log", log, "↑↓ scroll · Esc return to results")
 
     def _view_campaign_results(self) -> None:
-        result_file = self._file_picker("Seleziona i risultati della campagna (.json)", suffixes={".json"})
+        result_file = self._file_picker(
+            "Select campaign results (.json)", suffixes={".json"}
+        )
         if result_file is None:
             return
         try:
             results = json.loads(result_file.read_text(encoding="utf-8"))
         except Exception as error:
-            self._message("Errore", f"Impossibile leggere il file: {error}", error=True)
+            self._message("Error", f"Unable to read the file: {error}", error=True)
             return
         self._campaign_summary(result_file.name, results)
 
-    def _campaign_summary(self, name: str, results: list[dict]) -> None:
+    def _campaign_summary(
+        self, name: str, results: list[dict], log: list[str] | None = None
+    ) -> None:
         if not results:
-            self._message("Nessun risultato", "La campagna non contiene risultati.")
+            self._message("No results", "This campaign contains no results.")
             return
         selected = 0
         while True:
@@ -253,33 +303,46 @@ class AspisTui:
                 return f"{(count / total) * 100:.1f}%"
 
             lines = [
-                f"CAMPAGNA: {name} - TEST: {result['name']} ({selected + 1}/{len(results)})",
+                f"CAMPAIGN: {name} - TEST: {result['name']} ({selected + 1}/{len(results)})",
                 "",
-                "CONFIGURAZIONE & OVERHEADS",
+                "CONFIGURATION & OVERHEAD",
+                f"  Per-process timeout       : {result.get('timeout_ms', 'n/a')} ms",
             ]
             
             diff = result.get("difference", {})
-            for field, label in [("binary_size_bytes", "Dimensione binario"), ("execution_time_seconds", "Tempo esecuzione")]:
+            for field, label in [
+                ("binary_size_bytes", "Binary size"),
+                ("execution_time_seconds", "Execution time"),
+            ]:
                 delta = diff.get(field, {})
                 percent = delta.get("percent")
-                percent_str = "n/d" if percent is None else f"{percent:+.2f}%"
+                percent_str = "n/a" if percent is None else f"{percent:+.2f}%"
                 lines.append(f"  {label:25}: {percent_str}")
             
             lines.extend([
                 "",
-                "RISULTATI INJECTION",
-                f"  Injections Totali         : {total}",
+                "FAULT INJECTION RESULTS",
+                f"  Total injections          : {total}",
                 f"  Masked                    : {injections.get('masked', 0):<5} ({pct(injections.get('masked', 0))})",
-                f"  Latent (Stato discorde)   : {injections.get('latent', 0):<5} ({pct(injections.get('latent', 0))})",
+                f"  Latent (State mismatch)   : {injections.get('latent', 0):<5} ({pct(injections.get('latent', 0))})",
                 f"  SDC (Silent Data Corrupt) : {injections.get('sdc', 0):<5} ({pct(injections.get('sdc', 0))})",
-                f"  Timeouts (Loop infinito)  : {injections.get('timeout', 0):<5} ({pct(injections.get('timeout', 0))})",
+                f"  Timeouts (Infinite loop)  : {injections.get('timeout', 0):<5} ({pct(injections.get('timeout', 0))})",
                 f"  Crashes (HW, Segfault)    : {injections.get('crash', 0):<5} ({pct(injections.get('crash', 0))})",
-                f"  ASPIS Data (Rilevati)     : {injections.get('aspis_data', 0):<5} ({pct(injections.get('aspis_data', 0))})",
-                f"  ASPIS CF (Rilevati)       : {injections.get('aspis_cf', 0):<5} ({pct(injections.get('aspis_cf', 0))})",
+                f"  ASPIS Data (Detected)     : {injections.get('aspis_data', 0):<5} ({pct(injections.get('aspis_data', 0))})",
+                f"  ASPIS CF (Detected)       : {injections.get('aspis_cf', 0):<5} ({pct(injections.get('aspis_cf', 0))})",
             ])
 
-            footer = "←→ cambia test · s ispeziona SDC · l ispeziona Latent · Esc torna indietro"
-            self._frame("ASPIS · Sommario Campagna", footer)
+            error_count = sum(line.startswith("ERROR:") for line in (log or []))
+            if error_count:
+                lines.insert(
+                    1,
+                    f"WARNING: {error_count} test(s) failed · press g to view the log",
+                )
+            footer = "←→ test · s SDC · l Latent"
+            if log is not None:
+                footer += " · g log"
+            footer += " · Esc go back"
+            self._frame("ASPIS · Campaign summary", footer)
             for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
                 self._write(row, 3, line)
             
@@ -294,11 +357,20 @@ class AspisTui:
                 self._sdc_inspector(name, result, state_key="sdc_states", title_prefix="SDC")
             elif key in (ord("l"), ord("L")):
                 self._sdc_inspector(name, result, state_key="latent_states", title_prefix="LATENT")
+            elif key in (ord("g"), ord("G")) and log is not None:
+                self._paged_text(
+                    "ASPIS · Campaign log",
+                    log,
+                    "↑↓ scroll · Esc return to summary",
+                )
 
     def _sdc_inspector(self, name: str, result: dict, state_key: str = "sdc_states", title_prefix: str = "SDC") -> None:
         sdc_states = result.get("injections", {}).get(state_key, [])
         if not sdc_states:
-            self._message(f"Nessun {title_prefix}", f"Non ci sono risultati da ispezionare per questo test.")
+            self._message(
+                f"No {title_prefix} results",
+                "There are no results to inspect for this test.",
+            )
             return
 
         oracle = result.get("oracle", {})
@@ -306,9 +378,9 @@ class AspisTui:
         while True:
             state = sdc_states[selected]
             lines = [
-                f"ISPEZIONE {title_prefix} ({selected + 1}/{len(sdc_states)}) - Test: {result['name']}",
+                f"{title_prefix} INSPECTION ({selected + 1}/{len(sdc_states)}) - Test: {result['name']}",
                 "",
-                "DIFFERENZE RISPETTO ALL'ORACLE:",
+                "DIFFERENCES FROM ORACLE:",
             ]
             
             # STDOUT
@@ -338,11 +410,11 @@ class AspisTui:
                 if oracle_vars.get(var) != aspis_vars.get(var):
                     var_lines.append(f"  {var}: ORACLE={oracle_vars.get(var, '<missing>')} ASPIS={aspis_vars.get(var, '<missing>')}")
             if var_lines:
-                lines.append("--- VARIABILI ---")
+                lines.append("--- VARIABLES ---")
                 lines.extend(var_lines)
                 lines.append("")
 
-            footer = "←→ scorri SDC · Esc torna al sommario"
+            footer = "←→ browse SDC · Esc return to summary"
             self._frame("ASPIS · SDC Inspector", footer)
             for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
                 if line.startswith("- "):
@@ -360,70 +432,254 @@ class AspisTui:
             elif key == curses.KEY_RIGHT:
                 selected = (selected + 1) % len(sdc_states)
 
-    def _create_configuration(self) -> None:
-        name = self._ask_text("Nome del test", "test")
-        if name is None:
-            return
-        if not WORD.fullmatch(name):
-            self._message("Nome non valido", "Usa solo lettere, numeri, _ o -.", error=True)
-            return
-        programs = self._file_picker("Seleziona i programmi (.c, .cpp, .rs)", multi=True, suffixes=SOURCE_SUFFIXES)
-        if not programs:
-            return
-        parents = {path.parent for path in programs}
-        if len(parents) != 1:
-            self._message("Programmi in cartelle diverse", "La grammatica accetta solo nomi file: seleziona file nella stessa cartella.", error=True)
-            return
-        source_dir = parents.pop()
-        data_mode = self._choose("Protezione dati", DATA_MODES)
-        if data_mode is None:
-            return
-        control_mode = self._choose("Protezione control flow", CONTROL_MODES)
-        if control_mode is None:
-            return
-        timeout = self._ask_positive("Timeout in millisecondi", "5000")
-        repetitions = self._ask_positive("Ripetizioni dell'esecuzione", "100")
-        if timeout is None or repetitions is None:
-            return
-        compiler_flags = self._ask_text(
-            "Compiler/linker flags (separate da virgola; es. -O2, -lm)", ""
+    def _create_configuration(self, batch: bool = False) -> None:
+        draft = ConfigurationDraft()
+        if batch:
+            if not self._select_batch_directory(draft):
+                return
+        else:
+            programs = self._file_picker(
+                "Select source files (.c, .cpp, .rs)",
+                multi=True,
+                suffixes=SOURCE_SUFFIXES,
+            )
+            if not programs:
+                return
+            draft.programs = [str(path.resolve()) for path in programs]
+
+        draft = self._configuration_form(
+            draft,
+            "ASPIS · New batch configuration"
+            if batch
+            else "ASPIS · New configuration",
         )
-        if compiler_flags is None:
+        if draft is None:
             return
-        injection = self._choose("Modalità injection", INJECTION_MODES)
-        if injection is None:
+
+        destination = self._file_picker(
+            "Choose where to save the configuration",
+            select_directory=True,
+        )
+        if destination is None:
             return
-        injection_line = injection
-        if injection == "register":
-            data_only = self._choose("Inietta solo dati?", ("false", "true"))
-            if data_only is None:
-                return
-            injection_line += f" data_only: {data_only}"
-        elif injection == "global":
-            target = self._ask_text("Variabile globale target (vuoto = nessuna)", "")
-            if target is None or (target and not WORD.fullmatch(target)):
-                self._message("Variabile non valida", "Usa solo lettere, numeri, _ o -.", error=True)
-                return
-            if target:
-                injection_line += f" target_global: {target}"
-        functions = self._ask_text("Funzioni/variabili, es. main(x:4), helper (vuoto = nessuna)", "")
-        if functions is None:
-            return
-        filename = self._ask_text("Nome file configurazione", "campaign.cfg")
+        filename = self._ask_text("Configuration file name", "campaign.cfg")
         if not filename:
             return
-        target = source_dir / filename
-        text = _configuration_text(name, [path.name for path in programs], data_mode, control_mode,
-                                   timeout, repetitions, compiler_flags, injection_line, functions)
+        if not filename.endswith(".cfg"):
+            filename += ".cfg"
+        target = destination / filename
         try:
-            _validate_config_text(text)
-        except Exception as error:
-            self._message("Configurazione non valida", str(error), error=True)
+            target.write_text(_draft_text(draft), encoding="utf-8")
+        except OSError as error:
+            self._message("Unable to save", str(error), error=True)
             return
-        target.write_text(text, encoding="utf-8")
-        self._message("Configurazione salvata", f"{target}\n\nOra puoi selezionarla da “Esegui test”.")
+        self._message(
+            "Configuration saved",
+            f"{target}\n\nSource files may be located in any directory.",
+        )
 
-    def _file_picker(self, title: str, multi: bool = False, suffixes: set[str] | None = None):
+    def _edit_configuration(self) -> None:
+        config = self._file_picker(
+            "Select a configuration to edit", suffixes={".cfg"}
+        )
+        if config is None:
+            return
+        try:
+            campaign = parse_runner_config(config)
+        except Exception as error:
+            self._message("Invalid configuration", str(error), error=True)
+            return
+
+        index = 0
+        if len(campaign.runs) > 1:
+            labels = [
+                f"{position + 1}. {run.name}"
+                for position, run in enumerate(campaign.runs)
+            ]
+            selected = self._choose("Select a test to edit", labels)
+            if selected is None:
+                return
+            index = labels.index(selected)
+
+        draft = self._configuration_form(
+            _draft_from_run(campaign.runs[index]),
+            f"ASPIS · Edit · {config.name}",
+        )
+        if draft is None:
+            return
+        try:
+            edited_runs = _campaign_from_draft(draft).runs
+            runs = [
+                *campaign.runs[:index],
+                *edited_runs,
+                *campaign.runs[index + 1 :],
+            ]
+            config.write_text(
+                campaign_to_text(Campaign(runs=runs)), encoding="utf-8"
+            )
+        except Exception as error:
+            self._message("Unable to save", str(error), error=True)
+            return
+        self._message(
+            "Configuration updated",
+            f"{config}\n\n{len(edited_runs)} test entries saved.",
+        )
+
+    def _configuration_form(
+        self, draft: ConfigurationDraft, title: str
+    ) -> ConfigurationDraft | None:
+        fields = (
+            ("name", "Name"),
+            ("programs", "Source files"),
+            ("data_mode", "Data protection"),
+            ("control_mode", "Control-flow protection"),
+            ("timeout", "Per-process timeout (ms)"),
+            ("repetitions", "Execution repetitions"),
+            ("compiler_flags", "Compiler/linker flags"),
+            ("injection", "Fault injection"),
+            ("functions", "Functions/variables"),
+        )
+        selected = 0
+        while True:
+            self._frame(
+                title,
+                "↑↓ field · Enter edit/save · Esc go back",
+            )
+            for index, (key, label) in enumerate(fields):
+                value = _draft_field_value(draft, key)
+                marker = "›" if selected == index else " "
+                attr = self._selected_attr() if selected == index else 0
+                self._write(2 + index * 2, 3, f"{marker} {label}", attr)
+                self._write(
+                    3 + index * 2,
+                    6,
+                    value or "(empty)",
+                    curses.color_pair(2),
+                )
+            save_index = len(fields)
+            save_row = 2 + save_index * 2
+            self._write(
+                save_row,
+                3,
+                f"{'›' if selected == save_index else ' '} Validate and save",
+                self._selected_attr() if selected == save_index else curses.A_BOLD,
+            )
+
+            key_code = self._key()
+            if key_code == 27:
+                return None
+            if key_code == curses.KEY_UP:
+                selected = (selected - 1) % (len(fields) + 1)
+            elif key_code == curses.KEY_DOWN:
+                selected = (selected + 1) % (len(fields) + 1)
+            elif key_code in (curses.KEY_ENTER, 10, 13):
+                if selected == save_index:
+                    errors = _draft_errors(draft)
+                    if not errors:
+                        try:
+                            _validate_config_text(_draft_text(draft))
+                        except Exception as error:
+                            errors.append(str(error))
+                    if errors:
+                        self._message(
+                            "Invalid configuration",
+                            "\n".join(errors),
+                            error=True,
+                        )
+                        continue
+                    return draft
+                self._edit_draft_field(draft, fields[selected][0])
+
+    def _edit_draft_field(self, draft: ConfigurationDraft, key: str) -> None:
+        if key == "programs":
+            mode = self._choose(
+                "Source selection", ("Select files", "Batch directory")
+            )
+            if mode == "Batch directory":
+                self._select_batch_directory(draft)
+            elif mode == "Select files":
+                programs = self._file_picker(
+                    "Select source files",
+                    multi=True,
+                    suffixes=SOURCE_SUFFIXES,
+                )
+                if programs:
+                    draft.programs = [str(path.resolve()) for path in programs]
+                    draft.batch_directory = ""
+            return
+        if key == "data_mode":
+            value = self._choose("Data protection", DATA_MODES)
+        elif key == "control_mode":
+            value = self._choose("Control-flow protection", CONTROL_MODES)
+        elif key == "injection":
+            value = self._edit_injection(draft.injection)
+        else:
+            labels = {
+                "name": "Test name",
+                "timeout": "Per-process timeout in milliseconds",
+                "repetitions": "Execution repetitions",
+                "compiler_flags": "Comma-separated compiler/linker flags",
+                "functions": "Functions/variables, e.g. main(x:4), helper",
+            }
+            value = self._ask_text(
+                labels[key],
+                str(getattr(draft, key)),
+                allow_empty=key in {"compiler_flags", "functions"},
+            )
+        if value is not None:
+            setattr(draft, key, value)
+
+    def _edit_injection(self, current: str) -> str | None:
+        mode = self._choose("Fault injection mode", INJECTION_MODES)
+        if mode is None:
+            return None
+        if mode == "register":
+            default = "true" if "data_only: true" in current else "false"
+            data_only = self._choose(
+                "Inject data registers only?",
+                (default, "false" if default == "true" else "true"),
+            )
+            return None if data_only is None else f"register data_only: {data_only}"
+        if mode == "global":
+            target = self._ask_text(
+                "Target global variable (empty = automatic)",
+                "",
+                allow_empty=True,
+            )
+            if target is None:
+                return None
+            return f"global target_global: {target}" if target else "global"
+        return "memory"
+
+    def _select_batch_directory(self, draft: ConfigurationDraft) -> bool:
+        directory = self._file_picker(
+            "Select a batch directory", select_directory=True
+        )
+        if directory is None:
+            return False
+        programs = sorted(
+            path.resolve()
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() in SOURCE_SUFFIXES
+        )
+        if not programs:
+            self._message(
+                "No source files found",
+                "The selected directory contains no .c, .cpp, or .rs files.",
+                error=True,
+            )
+            return False
+        draft.batch_directory = str(directory.resolve())
+        draft.programs = [str(path) for path in programs]
+        return True
+
+    def _file_picker(
+        self,
+        title: str,
+        multi: bool = False,
+        suffixes: set[str] | None = None,
+        select_directory: bool = False,
+    ):
         current = self.start_dir
         selected: set[Path] = set()
         index = 0
@@ -432,16 +688,30 @@ class AspisTui:
             try:
                 entries = [current.parent] + sorted(current.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))
             except OSError as error:
-                self._message("Cartella non accessibile", str(error), error=True)
+                self._message("Unable to open directory", str(error), error=True)
                 return None
-            entries = [path for path in entries if path == current.parent or path.is_dir() or suffixes is None or path.suffix.lower() in suffixes]
+            entries = [
+                path
+                for path in entries
+                if path == current.parent
+                or path.is_dir()
+                or (
+                    not select_directory
+                    and (suffixes is None or path.suffix.lower() in suffixes)
+                )
+            ]
             index = min(index, max(0, len(entries) - 1))
             view_height = self._height() - 7
             if index < offset:
                 offset = index
             if index >= offset + view_height:
                 offset = index - view_height + 1
-            self._frame(title, "↑↓ muovi · Invio apri/conferma · Spazio seleziona · Esc annulla")
+            footer = (
+                "↑↓ move · Enter open · s select this directory · Esc cancel"
+                if select_directory
+                else "↑↓ move · Enter open/confirm · Space select · Esc cancel"
+            )
+            self._frame(title, footer)
             self._write(2, 3, str(current), curses.color_pair(2))
             for row, path in enumerate(entries[offset:offset + view_height], start=4):
                 actual = offset + row - 4
@@ -451,6 +721,8 @@ class AspisTui:
             key = self._key()
             if key in (27, ord("q")):
                 return None
+            if select_directory and key in (ord("s"), ord("S")):
+                return current
             if key == curses.KEY_UP:
                 index = max(0, index - 1)
             elif key == curses.KEY_DOWN:
@@ -462,6 +734,8 @@ class AspisTui:
                 path = entries[index]
                 if path.is_dir():
                     current, index, offset = path.resolve(), 0, 0
+                elif select_directory:
+                    continue
                 elif multi:
                     selected.add(path)
                     return sorted(selected)
@@ -472,7 +746,10 @@ class AspisTui:
         options = tuple(options)
         selected = 0
         while True:
-            self._frame("ASPIS · Configurazione", "↑↓ seleziona · Invio conferma · Esc annulla")
+            self._frame(
+                "ASPIS · Configuration",
+                "↑↓ select · Enter confirm · Esc cancel",
+            )
             self._write(3, 3, title, curses.A_BOLD)
             for index, option in enumerate(options):
                 self._write(5 + index * 2, 5, f"{'›' if selected == index else ' '} {option}", self._selected_attr() if selected == index else 0)
@@ -491,17 +768,19 @@ class AspisTui:
         if value is None:
             return None
         if not value.isdigit() or int(value) < 1:
-            self._message("Valore non valido", "Inserisci un intero positivo.", error=True)
+            self._message(
+                "Invalid value", "Enter a positive integer.", error=True
+            )
             return None
         return value
 
     def _ask_text(
         self, title: str, default: str, allow_empty: bool = False
     ) -> str | None:
-        self._frame("ASPIS · Configurazione", "Invio conferma · Esc annulla")
+        self._frame("ASPIS · Configuration", "Enter confirm · Esc cancel")
         self._write(3, 3, title, curses.A_BOLD)
         if default:
-            self._write(4, 3, f"Predefinito: {default}", curses.color_pair(2))
+            self._write(4, 3, f"Default: {default}", curses.color_pair(2))
         self._write(5, 3, "> ")
         self.screen.move(5, 5)
         curses.curs_set(1)
@@ -537,7 +816,7 @@ class AspisTui:
                 offset = min(max(0, len(lines) - 1), offset + 1)
 
     def _message(self, title: str, text: str, error: bool = False) -> None:
-        self._frame(f"ASPIS · {title}", "Invio o Esc torna indietro")
+        self._frame(f"ASPIS · {title}", "Enter or Esc go back")
         attr = curses.color_pair(3) if error else 0
         for row, line in enumerate(_fit_lines(text.splitlines(), self._width() - 6, self._height() - 5), start=3):
             self._write(row, 3, line, attr)
@@ -610,12 +889,12 @@ def _load_toolchain(path: Path, fallback: Environment) -> Environment:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"Impossibile leggere {path}: {error}") from error
+        raise ValueError(f"Unable to read {path}: {error}") from error
     if not isinstance(payload, dict):
-        raise ValueError(f"{path} deve contenere un oggetto JSON.")
+        raise ValueError(f"{path} must contain a JSON object.")
     flags = payload.get("aspis_flags", [])
     if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
-        raise ValueError("aspis_flags deve essere una lista di stringhe.")
+        raise ValueError("aspis_flags must be a list of strings.")
     values = {
         "aspis_path": str(payload.get("aspis_path", fallback.aspis_path)),
         "llvm_path": str(payload.get("llvm_path", fallback.llvm_path)),
@@ -632,13 +911,13 @@ def _toolchain_errors(environment: Environment) -> list[str]:
     errors = []
     aspis_path = Path(environment.aspis_path)
     if not aspis_path.is_file():
-        errors.append(f"Script ASPIS non trovato: {aspis_path}")
+        errors.append(f"ASPIS script not found: {aspis_path}")
     elif not os.access(aspis_path, os.X_OK):
-        errors.append(f"Script ASPIS non eseguibile: {aspis_path}")
+        errors.append(f"ASPIS script is not executable: {aspis_path}")
 
     llvm_path = Path(environment.llvm_path)
     if not llvm_path.is_dir():
-        errors.append(f"Directory LLVM non trovata: {llvm_path}")
+        errors.append(f"LLVM directory not found: {llvm_path}")
     else:
         missing = [
             executable
@@ -646,12 +925,12 @@ def _toolchain_errors(environment: Environment) -> list[str]:
             if not (llvm_path / executable).is_file()
         ]
         if missing:
-            errors.append(f"Binari LLVM mancanti: {', '.join(missing)}")
+            errors.append(f"Missing LLVM binaries: {', '.join(missing)}")
 
     if shutil.which(environment.vanilla_compiler) is None:
-        errors.append(f"Compiler Oracle non trovato: {environment.vanilla_compiler}")
+        errors.append(f"Oracle compiler not found: {environment.vanilla_compiler}")
     if shutil.which(environment.gdb_executable) is None:
-        errors.append(f"Debugger non trovato: {environment.gdb_executable}")
+        errors.append(f"Debugger not found: {environment.gdb_executable}")
     return errors
 
 
@@ -660,15 +939,62 @@ def _aspis_command_preview(environment: Environment) -> str:
     if environment.llvm_path:
         command.extend(["--llvm-bin", str(environment.llvm_path)])
     command.extend(environment.aspis_flags)
-    command.extend(["<modalità>", "<sorgente.c>"])
+    command.extend(["<mode>", "<source.c>"])
     return shlex.join(command)
 
 
-def _configuration_text(name, programs, data_mode, control_mode, timeout, repetitions, flags, injection, functions) -> str:
+def _draft_field_value(draft: ConfigurationDraft, key: str) -> str:
+    if key != "programs":
+        return str(getattr(draft, key))
+    source_count = len(draft.programs)
+    source_label = "file" if source_count == 1 else "files"
+    if draft.batch_directory:
+        return f"batch · {draft.batch_directory} · {source_count} {source_label}"
+    if not draft.programs:
+        return ""
+    names = ", ".join(Path(program).name for program in draft.programs)
+    return f"{source_count} {source_label} · {names}"
+
+
+def _draft_errors(draft: ConfigurationDraft) -> list[str]:
+    errors = []
+    if not WORD.fullmatch(draft.name):
+        errors.append("Name: use letters, numbers, underscores, or hyphens only.")
+    if not draft.programs:
+        errors.append("Select at least one source file.")
+    for program in draft.programs:
+        path = Path(program)
+        if path.suffix.lower() not in SOURCE_SUFFIXES:
+            errors.append(f"Unsupported source extension: {path}")
+        elif not path.is_file():
+            errors.append(f"Source file not found: {path}")
+    for value, label in (
+        (draft.timeout, "Timeout"),
+        (draft.repetitions, "Execution repetitions"),
+    ):
+        if not value.isdigit() or int(value) < 1:
+            errors.append(f"{label}: enter a positive integer.")
+    return errors
+
+
+def _configuration_text(
+    name,
+    programs,
+    data_mode,
+    control_mode,
+    timeout,
+    repetitions,
+    flags,
+    injection,
+    functions,
+) -> str:
     lines = [
-        f"name: {name}", f"programs: [{', '.join(programs)}]",
-        f"data_protection: {data_mode}", f"control_flow_protection: {control_mode}",
-        f"timeout_ms: {timeout}", f"execution_repetitions: {repetitions}",
+        f"name: {name}",
+        f"programs: [{', '.join(json.dumps(str(program)) for program in programs)}]",
+        f"data_protection: {data_mode}",
+        f"control_flow_protection: {control_mode}",
+        f"timeout_ms: {timeout}",
+        f"execution_repetitions: {repetitions}",
     ]
     if flags:
         lines.append(f"compiler_flags: [{flags}]")
@@ -676,6 +1002,88 @@ def _configuration_text(name, programs, data_mode, control_mode, timeout, repeti
     if functions:
         lines.append(f"functions: [{functions}]")
     return "\n".join(lines) + "\n"
+
+
+def _draft_text(draft: ConfigurationDraft) -> str:
+    programs = draft.programs if draft.batch_directory else [draft.programs]
+    blocks = []
+    used_names = set()
+    for index, item in enumerate(programs, start=1):
+        run_programs = [item] if draft.batch_directory else item
+        name = draft.name
+        if draft.batch_directory:
+            stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(item).stem).strip("-")
+            name = f"{draft.name}-{stem or index}"
+            if name in used_names:
+                name = f"{name}-{index}"
+            used_names.add(name)
+        blocks.append(
+            _configuration_text(
+                name,
+                run_programs,
+                draft.data_mode,
+                draft.control_mode,
+                draft.timeout,
+                draft.repetitions,
+                draft.compiler_flags,
+                draft.injection,
+                draft.functions,
+            ).rstrip()
+        )
+    return "\n".join(blocks) + "\n"
+
+
+def _campaign_from_draft(draft: ConfigurationDraft) -> Campaign:
+    with NamedTemporaryFile("w", suffix=".cfg", encoding="utf-8", delete=False) as handle:
+        handle.write(_draft_text(draft))
+        path = Path(handle.name)
+    try:
+        return parse_runner_config(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
+    if isinstance(run.injection, RegisterInjection):
+        injection = (
+            f"register data_only: {'true' if run.injection.data_only else 'false'}"
+        )
+    elif isinstance(run.injection, MemoryInjection):
+        injection = "memory"
+    elif isinstance(run.injection, GlobalInjection):
+        injection = (
+            f"global target_global: {run.injection.target_global}"
+            if run.injection.target_global
+            else "global"
+        )
+    else:
+        raise TypeError(f"Unsupported injection: {type(run.injection).__name__}")
+    functions = ", ".join(
+        function.name
+        if not function.variables
+        else (
+            f"{function.name}("
+            + ", ".join(
+                variable.name
+                if variable.length is None
+                else f"{variable.name}:{variable.length}"
+                for variable in function.variables
+            )
+            + ")"
+        )
+        for function in run.functions
+    )
+    return ConfigurationDraft(
+        name=run.name,
+        programs=list(run.programs),
+        data_mode=run.data_protection.name.lower(),
+        control_mode=run.control_flow_protection.name.lower().replace("_", "-"),
+        timeout=str(run.timeout_ms),
+        repetitions=str(run.execution_repetitions),
+        compiler_flags=", ".join(run.compiler_flags),
+        injection=injection,
+        functions=functions,
+    )
 
 
 def _validate_config_text(text: str) -> None:
@@ -690,14 +1098,14 @@ def _validate_config_text(text: str) -> None:
 
 def _result_lines(result: dict) -> list[str]:
     oracle, aspis, difference = result["oracle"], result["aspis"], result["difference"]
-    lines = [f"TEST  {result['name']}", "", "ESITO", f"  return code     oracle {oracle['returncode']}   ASPIS {aspis['returncode']}",
-             f"  stdout          {'uguale' if oracle['stdout'] == aspis['stdout'] else 'DIFFERENTE'}",
-             f"  stderr          {'uguale' if oracle['stderr'] == aspis['stderr'] else 'DIFFERENTE'}", "", "MISURE"]
+    lines = [f"TEST  {result['name']}", f"  per-process timeout: {result.get('timeout_ms', 'n/a')} ms", "", "OUTCOME", f"  return code     oracle {oracle['returncode']}   ASPIS {aspis['returncode']}",
+             f"  stdout          {'same' if oracle['stdout'] == aspis['stdout'] else 'DIFFERENT'}",
+             f"  stderr          {'same' if oracle['stderr'] == aspis['stderr'] else 'DIFFERENT'}", "", "MEASUREMENTS"]
     for field, unit in (("execution_time_seconds", "s"), ("binary_size_bytes", "B")):
         delta = difference[field]
-        percentage = "n/d" if delta["percent"] is None else f"{delta['percent']:+.2f}%"
+        percentage = "n/a" if delta["percent"] is None else f"{delta['percent']:+.2f}%"
         lines.append(f"  {field}: oracle {oracle[field]:.6g} {unit} · ASPIS {aspis[field]:.6g} {unit} · Δ {delta['absolute']:+.6g} ({percentage})")
-    lines.extend(["", "VARIABILI"])
+    lines.extend(["", "VARIABLES"])
     names = sorted(set(oracle.get("variables", {})) | set(aspis.get("variables", {})))
     lines.extend(f"  {'OK' if oracle.get('variables', {}).get(name) == aspis.get('variables', {}).get(name) else 'DIFF':4} {name}: {oracle.get('variables', {}).get(name, '<missing>')} → {aspis.get('variables', {}).get(name, '<missing>')}" for name in names)
     return lines

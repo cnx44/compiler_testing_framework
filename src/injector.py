@@ -7,6 +7,7 @@ import tempfile
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
+from src.constants import DEFAULT_TIMEOUT_MS
 from src.config_parser import (
     GlobalInjection,
     MemoryInjection,
@@ -26,7 +27,7 @@ class BaseInjector(ABC):
         target_src: str | Path,
         target_function: TargetFunction,
         debugger: str | None = None,
-        timeout_ms: int = 5000,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ) -> list["BaseInjector"]:
         """Build the injectors required by one configured target function."""
         common_args = (
@@ -79,7 +80,7 @@ class BaseInjector(ABC):
         target_src: str | Path,
         target_func: str = "main",
         debugger: str | None = None,
-        timeout_ms: int = 5000,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ):
         self.env = env
         self.target_bin = Path(target_bin).resolve()
@@ -181,13 +182,20 @@ class BaseInjector(ABC):
                 if self._debugger_flavor(debugger) == "gdb"
                 else "profile_target_lldb.py"
             )
-            result = subprocess.run(
-                self._debugger_command(debugger, str(profile_script)),
-                capture_output=True,
-                text=True,
-                env=env,
-                stdin=subprocess.DEVNULL,
-            )
+            try:
+                result = subprocess.run(
+                    self._debugger_command(debugger, str(profile_script)),
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=self.timeout_ms / 1000.0,
+                    stdin=subprocess.DEVNULL,
+                )
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"{debugger}: profiling timed out after {self.timeout_ms} ms"
+                )
+                continue
 
             profile_data = {}
             for line in result.stdout.splitlines():
@@ -351,7 +359,7 @@ class BaseInjector(ABC):
 
 
 class RegisterInjector(BaseInjector):
-    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False, debugger: str | None = None, timeout_ms: int = 5000):
+    def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", data_only: bool = False, debugger: str | None = None, timeout_ms: int = DEFAULT_TIMEOUT_MS):
         super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms)
         self.data_only = data_only
 
@@ -378,7 +386,7 @@ class RegisterInjector(BaseInjector):
 
 class MemoryInjector(BaseInjector):
     def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
-                 payload_ptr: str = "", length_var: str = "", debugger: str | None = None, timeout_ms: int = 5000):
+                 payload_ptr: str = "", length_var: str = "", debugger: str | None = None, timeout_ms: int = DEFAULT_TIMEOUT_MS):
         super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms)
         self.payload_ptr = payload_ptr
         self.length_var = length_var
@@ -408,7 +416,7 @@ class MemoryInjector(BaseInjector):
 
 class GlobalInjector(BaseInjector):
     def __init__(self, env: Environment, target_bin: str | Path, target_src: str | Path, target_func: str = "main", 
-                 target_global: str = "", debugger: str | None = None, timeout_ms: int = 5000):
+                 target_global: str = "", debugger: str | None = None, timeout_ms: int = DEFAULT_TIMEOUT_MS):
         super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms)
         self.target_global = target_global
 

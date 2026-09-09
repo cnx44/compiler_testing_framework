@@ -9,6 +9,8 @@ fi
 
 SOURCE_NAME="$1"
 OPT_FLAG="$2" # Captures the flag if provided, otherwise remains empty
+TIMEOUT_MS="${TIMEOUT_MS:-5000}"
+export TIMEOUT_MS
 
 BIN_DIR="./fault_injection/${SOURCE_NAME}/compiled/" 
 CAMPAIGN_SCRIPT="./fault_injection/run_campaign.sh"
@@ -45,6 +47,7 @@ fi
 > "$LOG_FILE"
 
 echo "Starting full evaluation suite..." | tee -a "$LOG_FILE"
+echo "Per-process timeout: ${TIMEOUT_MS} ms" | tee -a "$LOG_FILE"
 if [ "$OPT_FLAG" == "--data-only" ]; then
     echo "Mode: DATA-ONLY (Filtered Registers & Variable-Aware Memory)" | tee -a "$LOG_FILE"
 else

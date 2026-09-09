@@ -13,6 +13,7 @@ import tempfile
 import time
 
 from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
+from src.constants import DEFAULT_TIMEOUT_MS
 from src.env import Environment
 from src.injector import BaseInjector
 
@@ -20,9 +21,15 @@ from src.injector import BaseInjector
 class ProgramRunner(ABC):
     """Build, execute, and inspect a program with a configured toolchain."""
 
-    def __init__(self, environment: Environment, debugger: str | None = None):
+    def __init__(
+        self,
+        environment: Environment,
+        debugger: str | None = None,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    ):
         self.environment = environment
         self.debugger = debugger
+        self.timeout_ms = timeout_ms
         self.src = ""
         self.exe = ""
         self.results: dict = {}
@@ -76,12 +83,18 @@ class ProgramRunner(ABC):
         run_result = None
         for _ in range(execution_repetitions):
             started_at = time.perf_counter()
-            run_result = subprocess.run(
-                [self._exe_command(), *args],
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-            )
+            try:
+                run_result = subprocess.run(
+                    [self._exe_command(), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_ms / 1000.0,
+                    stdin=subprocess.DEVNULL,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(
+                    f"Program execution timed out after {self.timeout_ms} ms."
+                ) from error
             execution_times.append(time.perf_counter() - started_at)
 
         mean = statistics.fmean(execution_times)
@@ -171,9 +184,15 @@ class ProgramRunner(ABC):
         target_function = self._debug_function_name(target_function)
         errors = []
         for debugger in self._debuggers():
-            debug_result = self._run_debugger(
-                debugger, target_function, args, variables_to_check
-            )
+            try:
+                debug_result = self._run_debugger(
+                    debugger, target_function, args, variables_to_check
+                )
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"{debugger}: snapshot timed out after {self.timeout_ms} ms"
+                )
+                continue
             if debug_result.returncode != 0:
                 errors.append(f"{debugger}: {debug_result.stderr.strip()}")
                 continue
@@ -249,7 +268,14 @@ class ProgramRunner(ABC):
                 "-o", f"command script import {script}"
             ]
             
-        return subprocess.run(command, capture_output=True, text=True, env=run_env, stdin=subprocess.DEVNULL)
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=run_env,
+            timeout=self.timeout_ms / 1000.0,
+            stdin=subprocess.DEVNULL,
+        )
 
     def _debug_variable_names(self, variable_names: list[str]):
         invalid = [
@@ -341,8 +367,9 @@ class AspisRunner(ProgramRunner):
         data_protection: DataProtectionMode = DataProtectionMode.EDDI,
         control_flow_protection: ControlFlowMode = ControlFlowMode.CFCSS,
         debugger: str | None = None,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ):
-        super().__init__(environment, debugger)
+        super().__init__(environment, debugger, timeout_ms)
         self.data_protection = data_protection
         self.control_flow_protection = control_flow_protection
 
@@ -482,14 +509,18 @@ class CampaignRun:
             self.log.append(
                 f"Execution repetitions: {run.execution_repetitions}"
             )
+            self.log.append(f"Per-process timeout: {run.timeout_ms} ms")
             self.log.append(f"Args: {shlex.join(run_args) if run_args else '(none)'}")
 
-            oracle_runner = OracleRunner(self.environment, self.debugger)
+            oracle_runner = OracleRunner(
+                self.environment, self.debugger, timeout_ms=run.timeout_ms
+            )
             aspis_runner = AspisRunner(
                 self.environment,
                 data_protection=run.data_protection,
                 control_flow_protection=run.control_flow_protection,
                 debugger=self.debugger,
+                timeout_ms=run.timeout_ms,
             )
 
             try:
@@ -603,6 +634,7 @@ class CampaignRun:
                 self.results.append(
                     {
                         "name": run.name,
+                        "timeout_ms": run.timeout_ms,
                         "oracle": oracle_results,
                         "aspis": aspis_results,
                         "difference": differences,

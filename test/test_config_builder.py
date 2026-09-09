@@ -17,10 +17,12 @@ from src.config_parser import (
 
 class ConfigBuilderTest(unittest.TestCase):
     def test_serializes_a_campaign_in_the_parser_grammar(self):
+        main_source = str(Path("/sources/main.c"))
+        utils_source = str(Path("/sources/lib files/utils.cpp"))
         campaign = Campaign([
             RunnerTest(
                 name="demo",
-                programs=["main.c", "utils.cpp"],
+                programs=[main_source, utils_source],
                 data_protection=DataProtectionMode.SEDDI,
                 control_flow_protection=ControlFlowMode.INTER_RASM,
                 timeout_ms=7000,
@@ -36,7 +38,7 @@ class ConfigBuilderTest(unittest.TestCase):
             text,
             (
                 "name: demo\n"
-                "programs: [main.c, utils.cpp]\n"
+                f'programs: ["{main_source}", "{utils_source}"]\n'
                 "data_protection: seddi\n"
                 "control_flow_protection: inter-rasm\n"
                 "timeout_ms: 7000\n"

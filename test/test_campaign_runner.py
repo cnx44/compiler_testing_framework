@@ -14,13 +14,19 @@ from src.config_parser import (
     TargetFunction,
     TargetVariable,
 )
+from src.constants import DEFAULT_TIMEOUT_MS
 from src.env import Environment
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
 
 class StubRunner(ProgramRunner):
-    def __init__(self, environment=None, debugger=None):
-        super().__init__(environment or Environment(), debugger)
+    def __init__(
+        self,
+        environment=None,
+        debugger=None,
+        timeout_ms=DEFAULT_TIMEOUT_MS,
+    ):
+        super().__init__(environment or Environment(), debugger, timeout_ms)
         self.compiled_sources = []
         self.compiler_flags = []
 
@@ -100,6 +106,7 @@ class ProgramRunnerTest(unittest.TestCase):
             },
         )
         self.assertEqual(run_process.call_args.args[0][1:], ["one", "two"])
+        self.assertEqual(run_process.call_args.kwargs["timeout"], 5)
         self.assertIsNone(runner._build_dir)
         self.assertFalse(Path(runner.exe).exists())
 
@@ -134,6 +141,38 @@ class ProgramRunnerTest(unittest.TestCase):
         )
         self.assertEqual(results["execution_repetitions"], 2)
         self.assertEqual(run_process.call_count, 2)
+
+    @patch("src.campaign_runner.subprocess.run")
+    def test_execute_uses_configured_timeout(self, run_process):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
+        runner = StubRunner(timeout_ms=1250)
+        runner._debug_snapshot = Mock(
+            return_value={"variables": {}, "registers": {}}
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".c") as source:
+            runner.compile([source.name])
+            try:
+                runner.execute()
+            finally:
+                runner.cleanup()
+
+        self.assertEqual(run_process.call_args.kwargs["timeout"], 1.25)
+
+    @patch("src.campaign_runner.subprocess.run")
+    def test_execute_reports_configured_timeout(self, run_process):
+        run_process.side_effect = subprocess.TimeoutExpired(["program"], 1.25)
+        runner = StubRunner(timeout_ms=1250)
+
+        with tempfile.NamedTemporaryFile(suffix=".c") as source:
+            runner.compile([source.name])
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError, "timed out after 1250 ms"
+                ):
+                    runner.execute()
+            finally:
+                runner.cleanup()
 
     def test_execute_rejects_non_positive_repetitions(self):
         runner = StubRunner()
@@ -258,6 +297,23 @@ rax = 0x2
         self.assertEqual(snapshot["registers"], {"rax": "0x2"})
         runner._run_debugger.assert_called_once_with("gdb", "main", [], ["sum"])
 
+    def test_debug_snapshot_tries_next_debugger_after_timeout(self):
+        runner = StubRunner(timeout_ms=1250)
+        runner._debuggers = Mock(return_value=["gdb", "lldb"])
+        runner._run_debugger = Mock(
+            side_effect=[
+                subprocess.TimeoutExpired(["gdb"], 1.25),
+                subprocess.CompletedProcess(
+                    [], 0, "@@ARGS@@\n@@LOCALS@@\n@@REGISTERS@@\nrax = 0x1\n", ""
+                ),
+            ]
+        )
+
+        snapshot = runner._debug_snapshot([])
+
+        self.assertEqual(snapshot["registers"], {"rax": "0x1"})
+        self.assertEqual(runner._run_debugger.call_count, 2)
+
     @patch("src.campaign_runner.subprocess.run")
     def test_gdb_command_prints_requested_global_variables(self, run_process):
         run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
@@ -271,6 +327,7 @@ rax = 0x2
         self.assertIn("env", kwargs)
         self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
         self.assertEqual(kwargs["env"]["TARGET_FUNC"], "work")
+        self.assertEqual(kwargs["timeout"], 5)
 
     @patch("src.campaign_runner.subprocess.run")
     def test_lldb_command_prints_requested_global_variables(self, run_process):
@@ -419,6 +476,9 @@ class AspisRunnerTest(unittest.TestCase):
                 "--coarse-grained",
                 str(Path("main.c").resolve()),
                 str(Path("helper.cpp").resolve()),
+                str(
+                    (Path(__file__).parents[1] / "src" / "aspis_handlers.c").resolve()
+                ),
                 "-Wall",
                 "-lm",
             ],
@@ -493,6 +553,7 @@ class CampaignRunTest(unittest.TestCase):
         variables=None,
         execution_repetitions=1,
         functions=None,
+        timeout_ms=DEFAULT_TIMEOUT_MS,
     ):
         target_funcs = [TargetFunction(f, [TargetVariable(v) for v in (variables or ["x"])]) for f in (functions or ["main"])]
         return Campaign(
@@ -505,6 +566,7 @@ class CampaignRunTest(unittest.TestCase):
                     compiler_flags=compiler_flags or [],
                     execution_repetitions=execution_repetitions,
                     functions=target_funcs,
+                    timeout_ms=timeout_ms,
                 )
             ]
         )
@@ -546,7 +608,9 @@ class CampaignRunTest(unittest.TestCase):
             log_path = Path(directory) / "campaign.log"
             campaign_run = CampaignRun(
                 self._campaign(
-                    compiler_flags=["-lm"], execution_repetitions=5
+                    compiler_flags=["-lm"],
+                    execution_repetitions=5,
+                    timeout_ms=1250,
                 ),
                 environment,
                 str(log_path),
@@ -555,7 +619,9 @@ class CampaignRunTest(unittest.TestCase):
             log = campaign_run.run_campaign(["a", "b"])
             written_log = log_path.read_text(encoding="utf-8")
 
-        oracle_class.assert_called_once_with(environment, "gdb")
+        oracle_class.assert_called_once_with(
+            environment, "gdb", timeout_ms=1250
+        )
         oracle_class.return_value.compile.assert_called_once_with(
             ["main.c", "helper.cpp"], ["-lm"]
         )
@@ -567,6 +633,7 @@ class CampaignRunTest(unittest.TestCase):
             data_protection=DataProtectionMode.FDSC,
             control_flow_protection=ControlFlowMode.RASM,
             debugger="gdb",
+            timeout_ms=1250,
         )
         aspis_class.return_value.compile.assert_called_once_with(
             ["main.c", "helper.cpp"], ["-lm"]
@@ -581,11 +648,13 @@ class CampaignRunTest(unittest.TestCase):
         self.assertIn("returncode: OK", log)
         self.assertIn("Compiler flags: -lm", log)
         self.assertIn("Execution repetitions: 5", log)
+        self.assertIn("Per-process timeout: 1250 ms", log)
         self.assertIn("  OK x: oracle=1 aspis=1", log)
         self.assertEqual(
             campaign_run.results[0]["difference"]["binary_size_bytes"],
             {"absolute": 0, "percent": 0.0},
         )
+        self.assertEqual(campaign_run.results[0]["timeout_ms"], 1250)
         self.assertEqual(written_log, "\n".join(log))
 
     @patch("src.injector.RegisterInjector")
@@ -613,7 +682,11 @@ class CampaignRunTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             campaign_run = CampaignRun(
-                self._campaign(functions=["work"], execution_repetitions=2),
+                self._campaign(
+                    functions=["work"],
+                    execution_repetitions=2,
+                    timeout_ms=1250,
+                ),
                 Environment(),
                 Path(directory) / "campaign.log",
             )
@@ -626,7 +699,7 @@ class CampaignRunTest(unittest.TestCase):
             "work",
             data_only=False,
             debugger=None,
-            timeout_ms=5000,
+            timeout_ms=1250,
         )
         self.assertEqual(
             injector_class.return_value.run.call_args_list,

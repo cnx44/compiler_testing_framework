@@ -4,6 +4,7 @@
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
     echo "Usage: $0 <TARGET_BIN> <reg|mem> [--data-only]"
     echo "Example: $0 ./fault_injection/bubble_sort/compiled/baseline_app.elf reg --data-only"
+    echo "Set TIMEOUT_MS to configure the per-GDB-process timeout (default: 5000)."
     exit 1
 fi
 
@@ -11,6 +12,14 @@ fi
 TARGET_BIN="$1"
 INJECT_FLAG="$2"
 NUM_RUNS=20
+TIMEOUT_MS="${TIMEOUT_MS:-5000}"
+
+if ! [[ "$TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: TIMEOUT_MS must be a positive integer."
+    exit 1
+fi
+
+TIMEOUT_SECONDS=$(awk -v timeout_ms="$TIMEOUT_MS" 'BEGIN { printf "%.3f", timeout_ms / 1000 }')
 
 if [[ "$INJECT_FLAG" != "reg" && "$INJECT_FLAG" != "mem" ]]; then
     echo "Error: Second argument must be 'reg' or 'mem'."
@@ -79,15 +88,22 @@ fi
 count_masked=0
 count_sdc=0
 count_crash=0
+count_timeout=0
 count_aspis_data=0
 count_aspis_cf=0
 
 echo "=== Phase 1: Profiling Target ==="
 echo "Target Binary:   $TARGET_BIN"
 echo "Target Function: $TARGET_FUNC"
+echo "Process Timeout: ${TIMEOUT_MS} ms"
 
 # Run profiling
-PROFILE_OUT=$(gdb -batch -q -x "$PROFILE_SCRIPT" --args "$TARGET_BIN" 2>/dev/null)
+PROFILE_OUT=$(timeout "${TIMEOUT_SECONDS}s" gdb -batch -q -x "$PROFILE_SCRIPT" --args "$TARGET_BIN" 2>/dev/null)
+PROFILE_STATUS=$?
+if [ $PROFILE_STATUS -eq 124 ]; then
+    echo "Fatal Error: Target profiling timed out after ${TIMEOUT_MS} ms."
+    exit 1
+fi
 MAX_STEPS=$(echo "$PROFILE_OUT" | grep "PROFILED_STEPS=" | cut -d'=' -f2)
 
 if [[ -z "$MAX_STEPS" || "$MAX_STEPS" == "ERROR"* ]]; then
@@ -113,12 +129,12 @@ for ((i=1; i<=NUM_RUNS; i++)); do
     # Remove the temporary file from the previous run to avoid reading stale data
     rm -f .inferior_out.txt
 
-    output=$(timeout 2s gdb -batch -return-child-result -q -x "$GDB_SCRIPT" --args "$TARGET_BIN" 2>&1)
+    output=$(timeout "${TIMEOUT_SECONDS}s" gdb -batch -return-child-result -q -x "$GDB_SCRIPT" --args "$TARGET_BIN" 2>&1)
     exit_code=$?
 
     # Evaluate execution results
     if [ $exit_code -eq 124 ]; then
-        ((count_crash++))
+        ((count_timeout++))
     elif echo "$output" | grep -q "Data corruption detected"; then
         ((count_aspis_data++))
     elif echo "$output" | grep -q "Control-flow signature mismatch"; then
@@ -153,6 +169,7 @@ echo "Target Type:  $INJECTION_TARGET"
 echo "Mode:         $MODE_TEXT"
 echo "Masked:       $count_masked"
 echo "SDC (KO):     $count_sdc"
+echo "Timeouts:     $count_timeout"
 echo "Crashes:      $count_crash"
 echo "ASPIS Data:   $count_aspis_data"
 echo "ASPIS CF:     $count_aspis_cf"

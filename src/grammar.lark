@@ -19,7 +19,7 @@ var_list: var_def ("," var_def)*
 var_def: WORD (":" POSITIVE_INT)?
 
 programs: program ("," program)*
-program:  WORD "." EXT
+program: PROGRAM_PATH | ESCAPED_STRING
 
 compiler_flag_list: COMPILER_FLAG ("," COMPILER_FLAG)*
 
@@ -38,7 +38,7 @@ BOOLEAN:			"true" | "false"
 
 DATA_PROTECTION: "eddi" | "seddi" | "fdsc" | "none"
 CONTROL_FLOW:	 "cfcss" | "rasm" | "inter-rasm" | "none"
-EXT:			 "c" | "cpp" | "rs"
+PROGRAM_PATH: /[^\s,\[\]"]+\.(?:cpp|c|rs)/
 POSITIVE_INT: /[1-9][0-9]*/
 COMPILER_FLAG: /[^\s,\[\]]+/
 
@@ -47,3 +47,4 @@ NL: /\r?\n/
 
 %ignore /[ \t]+/
 %ignore /\r?\n[ \t]*(?=\r?\n)/
+%import common.ESCAPED_STRING

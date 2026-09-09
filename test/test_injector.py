@@ -56,6 +56,24 @@ class BaseInjectorTest(unittest.TestCase):
         self.assertEqual(command[:5], ["gdb", "--batch", "-q", "-x", str(injector.base_dir / "profile_target.py")])
         self.assertEqual(command[-2:], ["--args", injector.target_bin])
         self.assertEqual(run_process.call_args.kwargs["env"]["TARGET_FUNC"], "target")
+        self.assertEqual(run_process.call_args.kwargs["timeout"], 5)
+
+    @patch("src.injector.subprocess.run")
+    def test_profile_target_uses_and_reports_configured_timeout(self, run_process):
+        run_process.side_effect = subprocess.TimeoutExpired(["gdb"], 1.25)
+        injector = NormalExecution(
+            Environment(),
+            "/tmp/program",
+            "/tmp/main.c",
+            "target",
+            debugger="gdb",
+            timeout_ms=1250,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "timed out after 1250 ms"):
+            injector.profile_target()
+
+        self.assertEqual(run_process.call_args.kwargs["timeout"], 1.25)
 
     @patch("src.injector.shutil.which", side_effect=lambda executable: executable)
     @patch("src.injector.subprocess.run")

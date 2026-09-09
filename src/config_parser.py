@@ -1,8 +1,12 @@
-from dataclasses import dataclass, field
-from lark import Lark, Transformer
+import json
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import cast
+
+from lark import Lark, Transformer
+
+from src.constants import DEFAULT_TIMEOUT_MS
 
 
 class DataProtectionMode(Enum):
@@ -46,7 +50,7 @@ class RunnerTest:
     data_protection: DataProtectionMode
     control_flow_protection: ControlFlowMode
     injection: RegisterInjection | MemoryInjection | GlobalInjection = field(default_factory=RegisterInjection)
-    timeout_ms: int = 5000
+    timeout_ms: int = DEFAULT_TIMEOUT_MS
     functions: list[TargetFunction] = field(default_factory=list)
     compiler_flags: list[str] = field(default_factory=list)
     execution_repetitions: int = 1
@@ -60,8 +64,11 @@ class RunnerConfigTransformer(Transformer):
     def WORD(self, token):
         return str(token)
 
-    def EXT(self, token):
+    def PROGRAM_PATH(self, token):
         return str(token)
+
+    def ESCAPED_STRING(self, token):
+        return json.loads(str(token))
     
     def BOOLEAN(self, token):
         return str(token) == "true"
@@ -81,7 +88,7 @@ class RunnerConfigTransformer(Transformer):
         return int(token)
 
     def program(self, items):
-        return f"{items[0]}.{items[1]}"
+        return str(items[0])
 
     def programs(self, items):
         return list(items)
@@ -161,7 +168,7 @@ class RunnerConfigTransformer(Transformer):
               execution_repetitions=optional.get("execution_repetitions", 1),
               functions=optional.get("functions", [TargetFunction(name="main")]),
               injection=optional.get("injection", RegisterInjection()),
-              timeout_ms=optional.get("timeout_ms", 5000),
+              timeout_ms=optional.get("timeout_ms", DEFAULT_TIMEOUT_MS),
           )
 
     def campaign(self, items):
@@ -176,10 +183,28 @@ def parse_runner_config(config_path: str | Path) -> Campaign:
 
 
     # Read the configuration source and build the Parse Tree
-    source = Path(config_path).read_text(encoding="utf-8")
+    config_path = Path(config_path).expanduser().resolve()
+    source = config_path.read_text(encoding="utf-8")
     tree = parser.parse(source)
 
 
     # Transform the tree into the final domain object
-    campaign = RunnerConfigTransformer().transform(tree)
-    return cast(Campaign, campaign)
+    campaign = cast(Campaign, RunnerConfigTransformer().transform(tree))
+    runs = [
+        replace(
+            run,
+            programs=[
+                _resolve_program_path(program, config_path.parent)
+                for program in run.programs
+            ],
+        )
+        for run in campaign.runs
+    ]
+    return Campaign(runs=runs)
+
+
+def _resolve_program_path(program: str, config_directory: Path) -> str:
+    path = Path(program).expanduser()
+    if not path.is_absolute():
+        path = config_directory / path
+    return str(path.resolve())
