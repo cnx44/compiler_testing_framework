@@ -45,6 +45,10 @@ DEFAULT_ASPIS_PATH = "/mnt/misto/projects/ASPIS/aspis.sh"
 DEFAULT_LLVM_PATH = "/home/cnx/llvm-21.1.8/build/bin"
 
 
+class _QuitTui(Exception):
+    """Signal a ``:q`` command from any nested TUI screen."""
+
+
 @dataclass
 class ConfigurationDraft:
     name: str = "test"
@@ -75,7 +79,10 @@ class AspisTui:
         curses.curs_set(0)
         screen.keypad(True)
         self._init_colors()
-        self._home()
+        try:
+            self._home()
+        except _QuitTui:
+            return
 
     def _init_colors(self) -> None:
         if curses.has_colors():
@@ -97,7 +104,7 @@ class AspisTui:
             "Exit",
         ]
         while True:
-            self._frame("ASPIS · Campaign console", "↑↓ select · Enter confirm · q quit")
+            self._frame("ASPIS · Campaign console", "↑↓/jk select · Enter confirm")
             self._write(3, 3, "Active toolchain", curses.A_BOLD)
             self._write(4, 3, _aspis_command_preview(self.environment), curses.color_pair(2))
             self._write(6, 3, "Choose an action", curses.A_BOLD)
@@ -106,13 +113,11 @@ class AspisTui:
                 attr = self._selected_attr() if index == choice else 0
                 self._write(8 + index * 2, 5, f"{marker} {label}", attr)
             key = self._key()
-            if key in (ord("q"), 27) or (
-                key in (curses.KEY_ENTER, 10, 13) and choice == 6
-            ):
+            if key in (curses.KEY_ENTER, 10, 13) and choice == 6:
                 return
-            if key == curses.KEY_UP:
+            if key in (curses.KEY_UP, ord("k")):
                 choice = (choice - 1) % len(choices)
-            elif key == curses.KEY_DOWN:
+            elif key in (curses.KEY_DOWN, ord("j")):
                 choice = (choice + 1) % len(choices)
             elif key in (curses.KEY_ENTER, 10, 13):
                 if choice == 0:
@@ -148,7 +153,7 @@ class AspisTui:
             candidate = _environment_from_values(values)
             self._frame(
                 "ASPIS · Toolchain",
-                "↑↓ select · Enter edit/save · Esc cancel",
+                "↑↓/jk select · Enter edit/save · Esc cancel",
             )
             self._write(2, 3, "Project settings", curses.A_BOLD)
             for index, (key, label) in enumerate(fields):
@@ -176,9 +181,9 @@ class AspisTui:
             key_code = self._key()
             if key_code == 27:
                 return
-            if key_code == curses.KEY_UP:
+            if key_code in (curses.KEY_UP, ord("k")):
                 selected = (selected - 1) % (len(fields) + 1)
-            elif key_code == curses.KEY_DOWN:
+            elif key_code in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % (len(fields) + 1)
             elif key_code in (curses.KEY_ENTER, 10, 13):
                 if selected < len(fields):
@@ -242,7 +247,7 @@ class AspisTui:
             self._paged_text(
                 "ASPIS · Campaign failed",
                 runner.log or ["The campaign produced no results."],
-                "↑↓ scroll · Esc return to file selection",
+                "↑↓/jk scroll · Esc return to file selection",
             )
             return
         self._campaign_summary(config.name, runner.results, runner.log)
@@ -259,19 +264,19 @@ class AspisTui:
         while True:
             result = results[selected]
             lines = _result_lines(result)
-            footer = "←→ test · l full log · Esc return to menu"
+            footer = "←→/hl test · g full log · Esc return to menu"
             self._frame(f"ASPIS · Results · {config.name} ({selected + 1}/{len(results)})", footer)
             for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
                 self._write(row, 3, line)
             key = self._key()
             if key in (27, ord("q")):
                 return
-            if key == curses.KEY_LEFT:
+            if key in (curses.KEY_LEFT, ord("h")):
                 selected = (selected - 1) % len(results)
-            elif key == curses.KEY_RIGHT:
+            elif key in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(results)
-            elif key in (ord("l"), ord("L")):
-                self._paged_text("ASPIS · Log", log, "↑↓ scroll · Esc return to results")
+            elif key in (ord("g"), ord("G")):
+                self._paged_text("ASPIS · Log", log, "↑↓/jk scroll · Esc return to results")
 
     def _view_campaign_results(self) -> None:
         result_file = self._file_picker(
@@ -338,7 +343,7 @@ class AspisTui:
                     1,
                     f"WARNING: {error_count} test(s) failed · press g to view the log",
                 )
-            footer = "←→ test · s SDC · l Latent"
+            footer = "←→/hl test · s SDC · t Latent"
             if log is not None:
                 footer += " · g log"
             footer += " · Esc go back"
@@ -349,19 +354,19 @@ class AspisTui:
             key = self._key()
             if key in (27, ord("q")):
                 return
-            if key == curses.KEY_LEFT:
+            if key in (curses.KEY_LEFT, ord("h")):
                 selected = (selected - 1) % len(results)
-            elif key == curses.KEY_RIGHT:
+            elif key in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(results)
             elif key in (ord("s"), ord("S")):
                 self._sdc_inspector(name, result, state_key="sdc_states", title_prefix="SDC")
-            elif key in (ord("l"), ord("L")):
+            elif key in (ord("t"), ord("T")):
                 self._sdc_inspector(name, result, state_key="latent_states", title_prefix="LATENT")
             elif key in (ord("g"), ord("G")) and log is not None:
                 self._paged_text(
                     "ASPIS · Campaign log",
                     log,
-                    "↑↓ scroll · Esc return to summary",
+                    "↑↓/jk scroll · Esc return to summary",
                 )
 
     def _sdc_inspector(self, name: str, result: dict, state_key: str = "sdc_states", title_prefix: str = "SDC") -> None:
@@ -414,7 +419,7 @@ class AspisTui:
                 lines.extend(var_lines)
                 lines.append("")
 
-            footer = "←→ browse SDC · Esc return to summary"
+            footer = f"←→/hl browse {title_prefix} · Esc return to summary"
             self._frame("ASPIS · SDC Inspector", footer)
             for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
                 if line.startswith("- "):
@@ -427,9 +432,9 @@ class AspisTui:
             key = self._key()
             if key in (27, ord("q")):
                 return
-            if key == curses.KEY_LEFT:
+            if key in (curses.KEY_LEFT, ord("h")):
                 selected = (selected - 1) % len(sdc_states)
-            elif key == curses.KEY_RIGHT:
+            elif key in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(sdc_states)
 
     def _create_configuration(self, batch: bool = False) -> None:
@@ -543,7 +548,7 @@ class AspisTui:
         while True:
             self._frame(
                 title,
-                "↑↓ field · Enter edit/save · Esc go back",
+                "↑↓/jk field · Enter edit/save · Esc go back",
             )
             for index, (key, label) in enumerate(fields):
                 value = _draft_field_value(draft, key)
@@ -568,9 +573,9 @@ class AspisTui:
             key_code = self._key()
             if key_code == 27:
                 return None
-            if key_code == curses.KEY_UP:
+            if key_code in (curses.KEY_UP, ord("k")):
                 selected = (selected - 1) % (len(fields) + 1)
-            elif key_code == curses.KEY_DOWN:
+            elif key_code in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % (len(fields) + 1)
             elif key_code in (curses.KEY_ENTER, 10, 13):
                 if selected == save_index:
@@ -707,9 +712,9 @@ class AspisTui:
             if index >= offset + view_height:
                 offset = index - view_height + 1
             footer = (
-                "↑↓ move · Enter open · s select this directory · Esc cancel"
+                "↑↓/jk move · h parent · Enter/l open · s select directory · Esc cancel"
                 if select_directory
-                else "↑↓ move · Enter open/confirm · Space select · Esc cancel"
+                else "↑↓/jk move · h parent · Enter/l open · Space select · Esc cancel"
             )
             self._frame(title, footer)
             self._write(2, 3, str(current), curses.color_pair(2))
@@ -723,14 +728,16 @@ class AspisTui:
                 return None
             if select_directory and key in (ord("s"), ord("S")):
                 return current
-            if key == curses.KEY_UP:
+            if key == ord("h"):
+                current, index, offset = current.parent.resolve(), 0, 0
+            elif key in (curses.KEY_UP, ord("k")):
                 index = max(0, index - 1)
-            elif key == curses.KEY_DOWN:
+            elif key in (curses.KEY_DOWN, ord("j")):
                 index = min(len(entries) - 1, index + 1)
             elif key == ord(" ") and multi and entries[index].is_file():
                 path = entries[index]
                 selected.symmetric_difference_update({path})
-            elif key in (curses.KEY_ENTER, 10, 13):
+            elif key in (curses.KEY_ENTER, 10, 13, ord("l")):
                 path = entries[index]
                 if path.is_dir():
                     current, index, offset = path.resolve(), 0, 0
@@ -748,7 +755,7 @@ class AspisTui:
         while True:
             self._frame(
                 "ASPIS · Configuration",
-                "↑↓ select · Enter confirm · Esc cancel",
+                "↑↓/jk select · Enter confirm · Esc cancel",
             )
             self._write(3, 3, title, curses.A_BOLD)
             for index, option in enumerate(options):
@@ -756,9 +763,9 @@ class AspisTui:
             key = self._key()
             if key == 27:
                 return None
-            if key == curses.KEY_UP:
+            if key in (curses.KEY_UP, ord("k")):
                 selected = (selected - 1) % len(options)
-            elif key == curses.KEY_DOWN:
+            elif key in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % len(options)
             elif key in (curses.KEY_ENTER, 10, 13):
                 return options[selected]
@@ -810,9 +817,9 @@ class AspisTui:
             key = self._key()
             if key in (27, ord("q")):
                 return
-            if key == curses.KEY_UP:
+            if key in (curses.KEY_UP, ord("k")):
                 offset = max(0, offset - 1)
-            elif key == curses.KEY_DOWN:
+            elif key in (curses.KEY_DOWN, ord("j")):
                 offset = min(max(0, len(lines) - 1), offset + 1)
 
     def _message(self, title: str, text: str, error: bool = False) -> None:
@@ -824,6 +831,7 @@ class AspisTui:
             pass
 
     def _frame(self, title: str, footer: str) -> None:
+        footer = f"{footer} · :q exit app"
         self.screen.erase()
         self._write(0, 2, title, curses.A_BOLD)
         self._write(self._height() - 2, 2, footer, curses.color_pair(2))
@@ -838,7 +846,13 @@ class AspisTui:
             pass
 
     def _key(self) -> int:
-        return self.screen.getch()
+        key = self.screen.getch()
+        if key == ord(":"):
+            command = self.screen.getch()
+            if command == ord("q"):
+                raise _QuitTui
+            return command
+        return key
 
     def _width(self) -> int:
         return self.screen.getmaxyx()[1]

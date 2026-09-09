@@ -1,3 +1,4 @@
+import curses
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from src.env import Environment
 from src.front_end import (
     AspisTui,
     ConfigurationDraft,
+    _QuitTui,
     _aspis_command_preview,
     _campaign_from_draft,
     _configuration_text,
@@ -31,6 +33,57 @@ from src.config_parser import (
 
 
 class FrontEndSupportTest(unittest.TestCase):
+    def test_colon_q_exits_from_any_tui_screen(self):
+        tui = AspisTui(Environment())
+        tui.screen = MagicMock()
+        tui.screen.getch.side_effect = [ord(":"), ord("q")]
+
+        with self.assertRaises(_QuitTui):
+            tui._key()
+
+    def test_main_handles_colon_q_exit_signal(self):
+        tui = AspisTui(Environment())
+        screen = MagicMock()
+        with (
+            patch("src.front_end.curses.curs_set"),
+            patch.object(tui, "_init_colors"),
+            patch.object(tui, "_home", side_effect=_QuitTui),
+        ):
+            tui._main(screen)
+
+    def test_home_accepts_j_for_downward_navigation(self):
+        tui = AspisTui(Environment())
+        tui.screen = MagicMock()
+        with (
+            patch.object(tui, "_frame"),
+            patch.object(tui, "_write"),
+            patch.object(
+                tui,
+                "_key",
+                side_effect=[ord("j"), curses.KEY_ENTER, _QuitTui],
+            ),
+            patch("src.front_end.curses.color_pair", return_value=0),
+            patch.object(tui, "_create_configuration") as create,
+        ):
+            with self.assertRaises(_QuitTui):
+                tui._home()
+
+        create.assert_called_once_with()
+
+    def test_plain_q_does_not_exit_from_home(self):
+        tui = AspisTui(Environment())
+        tui.screen = MagicMock()
+        with (
+            patch.object(tui, "_frame") as frame,
+            patch.object(tui, "_write"),
+            patch.object(tui, "_key", side_effect=[ord("q"), _QuitTui]),
+            patch("src.front_end.curses.color_pair", return_value=0),
+        ):
+            with self.assertRaises(_QuitTui):
+                tui._home()
+
+        self.assertEqual(frame.call_count, 2)
+
     def test_editor_output_is_accepted_by_the_campaign_parser(self):
         text = _configuration_text(
             "demo", ["main.c"], "eddi", "cfcss", "5000", "1",
@@ -138,7 +191,7 @@ class FrontEndSupportTest(unittest.TestCase):
         paged_text.assert_called_once_with(
             "ASPIS · Campaign failed",
             failed_runner.log,
-            "↑↓ scroll · Esc return to file selection",
+            "↑↓/jk scroll · Esc return to file selection",
         )
 
     def test_toolchain_configuration_round_trip_preserves_aspis_flags(self):
