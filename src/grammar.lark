@@ -10,13 +10,13 @@ injection: INJECTION_K injection_mode NL
 ?injection_mode: register_mode | memory_mode | global_mode
 register_mode: "register" (DATA_ONLY_K BOOLEAN)?
 memory_mode: "memory"
-global_mode: "global" (TARGET_GLOBAL_K WORD)?
+global_mode: "global"
 
 functions: FUNCTIONS_K "[" function_list? "]" NL
 function_list: function_def ("," function_def)*
 function_def: WORD ("(" var_list ")")?
 var_list: var_def ("," var_def)*
-var_def: WORD (":" POSITIVE_INT)?
+var_def: GLOBAL_MARKER? WORD (":" POSITIVE_INT)?
 
 programs: program ("," program)*
 program: PROGRAM_PATH | ESCAPED_STRING
@@ -34,6 +34,7 @@ INJECTION_K:		"injection:"
 FUNCTIONS_K:		"functions:"
 DATA_ONLY_K:		"data_only:"
 TARGET_GLOBAL_K:	"target_global:"
+GLOBAL_MARKER:		"@"
 BOOLEAN:			"true" | "false"
 
 DATA_PROTECTION: "eddi" | "seddi" | "fdsc" | "none"

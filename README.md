@@ -377,8 +377,8 @@ control_flow_protection: cfcss | rasm | inter-rasm | none
 [timeout_ms: <intero positivo>]
 [execution_repetitions: <intero positivo>]
 [compiler_flags: [<flag>, ...]]
-[injection: register [data_only: true|false] | memory | global [target_global: <nome>]]
-[functions: [<funzione>[(<variabile>[:<lunghezza>], ...)], ...]]
+[injection: register [data_only: true|false] | memory | global]
+[functions: [<funzione>([@]<variabile>[:<lunghezza>], ...)], ...]]
 ```
 
 ### Campi e valori predefiniti
@@ -451,14 +451,13 @@ La lista ha tre effetti:
 
 - definisce le funzioni di cui acquisire lo snapshot;
 - definisce lo scope in cui effettuare l'injection;
-- indica le variabili da confrontare e, per la modalità `memory`, i possibili
-  payload da colpire.
+- indica le variabili da confrontare e i possibili payload da colpire. Per la modalità `memory` verranno usate solo le variabili standard (es. `buffer`), mentre per la modalità `global` verranno usate solo le variabili precedute da `@` (es. `@counter`).
 
 `buffer:128` associa alla variabile una lunghezza di 128 elementi. Senza
 lunghezza, l'injector tenta di inferire la dimensione degli array statici; per un
 puntatore o uno scalare non inferibile usa un elemento. Se `functions: []` è
 esplicito, non vengono creati injector; l'esecuzione normale conserva comunque
-lo snapshot predefinito di `main`.
+lo snapshot predefinito di `main`. Se per una data modalità di iniezione non viene fornita alcuna variabile compatibile, il framework ricadrà su una selezione casuale della variabile da corrompere.
 
 ### Esempio completo
 
@@ -500,8 +499,8 @@ programs: [../sources/global.c]
 data_protection: fdsc
 control_flow_protection: inter-rasm
 execution_repetitions: 25
-injection: global target_global: counter
-functions: [main(counter)]
+injection: global
+functions: [main(@counter)]
 ```
 
 ### Argomenti del programma: file `.values`
@@ -585,16 +584,20 @@ dalla qualità delle informazioni di debug e dall'ABI della piattaforma.
 Target esplicito:
 
 ```text
-injection: global target_global: counter
+injection: global
+functions: [main(@counter)]
 ```
 
 oppure selezione automatica:
 
 ```text
 injection: global
+functions: [main]
 ```
 
-Nel secondo caso lo script analizza `info variables`, limita i candidati al
+La sintassi `@` indica al framework che la variabile specificata è globale. 
+Nel primo caso, la factory crea un `GlobalInjector` per ogni variabile globale (preceduta da `@`) configurata nella funzione.
+Nel secondo caso (nessuna variabile globale fornita esplicitamente), lo script analizza `info variables`, limita i candidati al
 sorgente di ingresso e ne sceglie uno casualmente. Dopo alcuni passi nella
 funzione, inverte un bit nei primi otto byte della globale scelta.
 
@@ -679,10 +682,10 @@ caso usare **Create configuration** e selezionare entrambi i file.
 
 ### Edit configuration
 
-Carica un `.cfg` esistente. Se contiene più test, chiede quale modificare. Il
+Carica un `.cfg` esistente. Se contiene più test, chiede quale modificare. Dalla lista dei test è anche possibile eliminare permanentemente un test selezionando la voce apposita (Delete test) nel form di modifica. Il
 test aggiornato viene nuovamente validato e serializzato insieme agli altri.
 I percorsi assoluti rendono la posizione del file di configurazione indipendente
-dalla posizione dei sorgenti.
+dalla posizione dei sorgenti. Se modifichi i parametri per molteplici file sorgente in un solo colpo (es. da batch), la TUI ti darà la possibilità di applicare una singola configurazione della funzione (es. `main`) a tutti i file contemporaneamente.
 
 ### Configure toolchain
 

@@ -50,7 +50,8 @@ class BaseInjector(ABC):
                 )
             ]
         if isinstance(injection, MemoryInjection):
-            if not target_function.variables:
+            memory_vars = [v for v in target_function.variables if not v.is_global]
+            if not memory_vars:
                 return [MemoryInjector(*common_args, **common_kwargs)]
             return [
                 MemoryInjector(
@@ -59,15 +60,19 @@ class BaseInjector(ABC):
                     length_var=str(variable.length) if variable.length else "",
                     **common_kwargs,
                 )
-                for variable in target_function.variables
+                for variable in memory_vars
             ]
         if isinstance(injection, GlobalInjection):
+            global_vars = [v for v in target_function.variables if v.is_global]
+            if not global_vars:
+                return [GlobalInjector(*common_args, **common_kwargs)]
             return [
                 GlobalInjector(
                     *common_args,
-                    target_global=injection.target_global,
+                    target_global=variable.name,
                     **common_kwargs,
                 )
+                for variable in global_vars
             ]
         raise TypeError(
             f"Unsupported injection configuration: {type(injection).__name__}"

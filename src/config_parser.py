@@ -31,12 +31,13 @@ class MemoryInjection:
 
 @dataclass(frozen=True)
 class GlobalInjection:
-    target_global: str = ""
+    pass
 
 @dataclass(frozen=True)
 class TargetVariable:
     name: str
     length: int | None = None
+    is_global: bool = False
 
 @dataclass(frozen=True)
 class TargetFunction:
@@ -121,20 +122,19 @@ class RunnerConfigTransformer(Transformer):
         return MemoryInjection()
         
     def global_mode(self, items):
-        # ``TARGET_GLOBAL_K`` is preserved by Lark alongside the variable name.
-        # Keep only the value so a configuration written by the TUI round-trips.
-        target_global = next(
-            (item for item in items if not str(item).endswith(":")), ""
-        )
-        return GlobalInjection(target_global=target_global)
+        return GlobalInjection()
         
     def injection(self, items):
         return ("injection", items[1])
 
     def var_def(self, items):
+        is_global = False
+        if items and getattr(items[0], "type", "") == "GLOBAL_MARKER":
+            is_global = True
+            items = items[1:]
         name = items[0]
         length = items[1] if len(items) > 1 else None
-        return TargetVariable(name=name, length=length)
+        return TargetVariable(name=name, length=length, is_global=is_global)
         
     def var_list(self, items):
         return list(items)

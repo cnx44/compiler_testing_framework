@@ -71,8 +71,8 @@ class ConfigurationDraft:
     timeout: str = str(DEFAULT_TIMEOUT_MS)
     repetitions: str = "100"
     compiler_flags: str = "-lm"
-    injection: str = "register data_only: false"
-    functions: str = "main"
+    injection: str | list[str] = field(default_factory=lambda: ["register data_only: false"])
+    functions: str | dict[str, str] = "main"
 
 
 class AspisTui:
@@ -548,30 +548,42 @@ class AspisTui:
         draft = self._configuration_form(
             _draft_from_run(campaign.runs[index]),
             f"ASPIS · Edit · {config.name}",
+            allow_delete=True
         )
         if draft is None:
             return
         try:
-            edited_runs = _campaign_from_draft(draft).runs
-            runs = [
-                *campaign.runs[:index],
-                *edited_runs,
-                *campaign.runs[index + 1 :],
-            ]
+            if draft == "DELETE":
+                runs = [
+                    *campaign.runs[:index],
+                    *campaign.runs[index + 1 :],
+                ]
+                edited_runs = []
+            else:
+                edited_runs = _campaign_from_draft(draft).runs
+                runs = [
+                    *campaign.runs[:index],
+                    *edited_runs,
+                    *campaign.runs[index + 1 :],
+                ]
             config.write_text(
                 campaign_to_text(Campaign(runs=runs)), encoding="utf-8"
             )
         except Exception as error:
             self._message("Unable to save", str(error), error=True)
             return
-        self._message(
-            "Configuration updated",
-            f"{config}\n\n{len(edited_runs)} test entries saved.",
-        )
+        
+        if draft == "DELETE":
+            self._message("Configuration updated", "Test deleted successfully.")
+        else:
+            self._message(
+                "Configuration updated",
+                f"{config}\n\n{len(edited_runs)} test entries saved.",
+            )
 
     def _configuration_form(
-        self, draft: ConfigurationDraft, title: str
-    ) -> ConfigurationDraft | None:
+        self, draft: ConfigurationDraft, title: str, allow_delete: bool = False
+    ) -> ConfigurationDraft | str | None:
         fields = (
             ("name", "Name"),
             ("programs", "Source files"),
@@ -601,6 +613,9 @@ class AspisTui:
                     curses.color_pair(2),
                 )
             save_index = len(fields)
+            delete_index = save_index + 1 if allow_delete else -1
+            max_index = save_index + (1 if allow_delete else 0)
+
             save_row = 2 + save_index * 2
             self._write(
                 save_row,
@@ -608,18 +623,33 @@ class AspisTui:
                 f"{'›' if selected == save_index else ' '} Validate and save",
                 self._selected_attr() if selected == save_index else curses.A_BOLD,
             )
+            
+            if allow_delete:
+                delete_row = 2 + delete_index * 2
+                self._write(
+                    delete_row,
+                    3,
+                    f"{'›' if selected == delete_index else ' '} Delete test",
+                    self._selected_attr() if selected == delete_index else curses.color_pair(3),
+                )
 
             key_code = self._key()
             if key_code == 27:
                 return None
             if key_code in (curses.KEY_UP, ord("k")):
-                selected = (selected - 1) % (len(fields) + 1)
+                selected = (selected - 1) % (max_index + 1)
             elif key_code in (curses.KEY_DOWN, ord("j")):
-                selected = (selected + 1) % (len(fields) + 1)
+                selected = (selected + 1) % (max_index + 1)
             elif key_code in (curses.KEY_ENTER, 10, 13):
+                if selected == delete_index:
+                    return "DELETE"
                 if selected == save_index:
                     errors = _draft_errors(draft)
                     if not errors:
+                        if draft.batch_directory and len(draft.programs) > 1 and not isinstance(draft.functions, dict):
+                            self._edit_draft_field(draft, "functions")
+                            if not isinstance(draft.functions, dict):
+                                continue
                         try:
                             _validate_config_text(_draft_text(draft))
                         except Exception as error:
@@ -673,7 +703,30 @@ class AspisTui:
                 _mode_values(draft.control_mode),
             )
         elif key == "injection":
-            value = self._edit_injection(draft.injection)
+            value = self._edit_injection(_mode_values(draft.injection))
+        elif key == "functions" and draft.batch_directory and len(draft.programs) > 1:
+            mode = self._choose("Function configuration", ("Apply same function to all files", "Specify per-file"))
+            if mode is None:
+                return
+                
+            functions_map = {}
+            if mode == "Apply same function to all files":
+                funcs = self._ask_text("Function for all files", "main")
+                if funcs is None:
+                    return
+                for program in draft.programs:
+                    functions_map[program] = funcs
+            else:
+                for program in draft.programs:
+                    prog_name = Path(program).name
+                    current_func = draft.functions.get(program, "main") if isinstance(draft.functions, dict) else draft.functions
+                    funcs = self._ask_text(f"Functions for {prog_name}", current_func)
+                    if funcs is None:
+                        return
+                    functions_map[program] = funcs
+                    
+            draft.functions = functions_map
+            return
         else:
             labels = {
                 "name": "Test name",
@@ -690,27 +743,60 @@ class AspisTui:
         if value is not None:
             setattr(draft, key, value)
 
-    def _edit_injection(self, current: str) -> str | None:
-        mode = self._choose("Fault injection mode", INJECTION_MODES)
-        if mode is None:
-            return None
-        if mode == "register":
-            default = "true" if "data_only: true" in current else "false"
-            data_only = self._choose(
-                "Inject data registers only?",
-                (default, "false" if default == "true" else "true"),
-            )
-            return None if data_only is None else f"register data_only: {data_only}"
-        if mode == "global":
-            target = self._ask_text(
-                "Target global variable (empty = automatic)",
-                "",
-                allow_empty=True,
-            )
-            if target is None:
-                return None
-            return f"global target_global: {target}" if target else "global"
-        return "memory"
+    def _edit_injection(self, current: list[str]) -> list[str] | None:
+        new_injections = list(current)
+        while True:
+            options = [f" {inj}" for inj in new_injections]
+            
+            has_reg_true = "register data_only: true" in new_injections
+            has_reg_false = "register data_only: false" in new_injections
+            has_memory = "memory" in new_injections
+            has_global = "global" in new_injections
+            
+            if not (has_reg_true and has_reg_false):
+                options.append("[Add Register Injection]")
+            if not has_memory:
+                options.append("[Add Memory Injection]")
+            if not has_global:
+                options.append("[Add Global Injection]")
+                
+            if new_injections:
+                options.append("[Remove Injection...]")
+            options.append("[Done]")
+            
+            choice = self._choose("Edit Fault Injections", options)
+            if choice is None:
+                return current
+            
+            if choice == "[Done]":
+                if not new_injections:
+                    self._message("Error", "At least one injection mode is required.", error=True)
+                    continue
+                return new_injections
+                
+            elif choice == "[Add Register Injection]":
+                avail = []
+                if not has_reg_true: avail.append("true")
+                if not has_reg_false: avail.append("false")
+                
+                if len(avail) == 1:
+                    data_only = avail[0]
+                else:
+                    data_only = self._choose("Inject data registers only?", tuple(avail))
+                    
+                if data_only is not None:
+                    new_injections.append(f"register data_only: {data_only}")
+            
+            elif choice == "[Add Memory Injection]":
+                new_injections.append("memory")
+                
+            elif choice == "[Add Global Injection]":
+                new_injections.append("global")
+                
+            elif choice == "[Remove Injection...]":
+                to_remove = self._choose("Select injection to remove", new_injections)
+                if to_remove is not None:
+                    new_injections.remove(to_remove)
 
     def _select_batch_directory(self, draft: ConfigurationDraft) -> bool:
         directory = self._file_picker(
@@ -1061,8 +1147,10 @@ def _aspis_command_preview(environment: Environment) -> str:
 def _draft_field_value(draft: ConfigurationDraft, key: str) -> str:
     if key != "programs":
         value = getattr(draft, key)
-        if key in {"data_mode", "control_mode"}:
+        if key in {"data_mode", "control_mode", "injection"}:
             return ", ".join(_mode_values(value))
+        if key == "functions" and isinstance(value, dict):
+            return "(configured per-file)"
         return str(value)
     source_count = len(draft.programs)
     source_label = "file" if source_count == 1 else "files"
@@ -1129,7 +1217,7 @@ def _configuration_text(
 def _draft_text(draft: ConfigurationDraft) -> str:
     programs = draft.programs if draft.batch_directory else [draft.programs]
     modes = list(product(
-        _mode_values(draft.data_mode), _mode_values(draft.control_mode)
+        _mode_values(draft.data_mode), _mode_values(draft.control_mode), _mode_values(draft.injection)
     ))
     blocks = []
     used_names = set()
@@ -1140,10 +1228,10 @@ def _draft_text(draft: ConfigurationDraft) -> str:
         if draft.batch_directory:
             stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(item).stem).strip("-")
             base_name = f"{draft.name}-{stem or index}"
-        for data_mode, control_mode in modes:
+        for data_mode, control_mode, injection in modes:
             name = base_name
             if multiple_modes:
-                name = f"{name}-{data_mode}-{control_mode}"
+                name = f"{name}-{data_mode}-{control_mode}-{injection.split()[0]}"
             candidate = name
             duplicate = 2
             while candidate in used_names:
@@ -1151,6 +1239,7 @@ def _draft_text(draft: ConfigurationDraft) -> str:
                 duplicate += 1
             name = candidate
             used_names.add(name)
+            file_functions = draft.functions.get(item, "") if isinstance(draft.functions, dict) else draft.functions
             blocks.append(
                 _configuration_text(
                     name,
@@ -1160,8 +1249,8 @@ def _draft_text(draft: ConfigurationDraft) -> str:
                     draft.timeout,
                     draft.repetitions,
                     draft.compiler_flags,
-                    draft.injection,
-                    draft.functions,
+                    injection,
+                    file_functions,
                 ).rstrip()
             )
     return "\n".join(blocks) + "\n"
@@ -1190,11 +1279,7 @@ def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
     elif isinstance(run.injection, MemoryInjection):
         injection = "memory"
     elif isinstance(run.injection, GlobalInjection):
-        injection = (
-            f"global target_global: {run.injection.target_global}"
-            if run.injection.target_global
-            else "global"
-        )
+        injection = "global"
     else:
         raise TypeError(f"Unsupported injection: {type(run.injection).__name__}")
     functions = ", ".join(
@@ -1203,9 +1288,9 @@ def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
         else (
             f"{function.name}("
             + ", ".join(
-                variable.name
+                ("@" if variable.is_global else "") + variable.name
                 if variable.length is None
-                else f"{variable.name}:{variable.length}"
+                else ("@" if variable.is_global else "") + f"{variable.name}:{variable.length}"
                 for variable in function.variables
             )
             + ")"
@@ -1220,7 +1305,7 @@ def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
         timeout=str(run.timeout_ms),
         repetitions=str(run.execution_repetitions),
         compiler_flags=", ".join(run.compiler_flags),
-        injection=injection,
+        injection=[injection],
         functions=functions,
     )
 
