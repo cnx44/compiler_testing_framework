@@ -15,6 +15,10 @@ import os
 import re
 import shlex
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor
+from queue import Empty, Queue
+from itertools import product
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,16 +53,24 @@ class _QuitTui(Exception):
     """Signal a ``:q`` command from any nested TUI screen."""
 
 
+class FileSelection(list[Path]):
+    """Paths selected by the picker, including an optional bulk directory."""
+
+    def __init__(self, paths: Iterable[Path], batch_directory: Path | None = None):
+        super().__init__(paths)
+        self.batch_directory = batch_directory
+
+
 @dataclass
 class ConfigurationDraft:
     name: str = "test"
     programs: list[str] = field(default_factory=list)
     batch_directory: str = ""
-    data_mode: str = "eddi"
-    control_mode: str = "cfcss"
+    data_mode: str | list[str] = field(default_factory=lambda: ["eddi"])
+    control_mode: str | list[str] = field(default_factory=lambda: ["cfcss"])
     timeout: str = str(DEFAULT_TIMEOUT_MS)
     repetitions: str = "100"
-    compiler_flags: str = ""
+    compiler_flags: str = "-lm"
     injection: str = "register data_only: false"
     functions: str = "main"
 
@@ -97,7 +109,6 @@ class AspisTui:
         choices = [
             "Run campaign",
             "Create configuration",
-            "Create batch configuration",
             "Edit configuration",
             "Configure toolchain",
             "View campaign results",
@@ -113,7 +124,7 @@ class AspisTui:
                 attr = self._selected_attr() if index == choice else 0
                 self._write(8 + index * 2, 5, f"{marker} {label}", attr)
             key = self._key()
-            if key in (curses.KEY_ENTER, 10, 13) and choice == 6:
+            if key in (curses.KEY_ENTER, 10, 13) and choice == 5:
                 return
             if key in (curses.KEY_UP, ord("k")):
                 choice = (choice - 1) % len(choices)
@@ -125,12 +136,10 @@ class AspisTui:
                 elif choice == 1:
                     self._create_configuration()
                 elif choice == 2:
-                    self._create_configuration(batch=True)
-                elif choice == 3:
                     self._edit_configuration()
-                elif choice == 4:
+                elif choice == 3:
                     self._configure_toolchain()
-                elif choice == 5:
+                elif choice == 4:
                     self._view_campaign_results()
 
     def _configure_toolchain(self) -> None:
@@ -219,11 +228,17 @@ class AspisTui:
                 return
 
     def _run_test(self) -> None:
-        config = self._file_picker(
-            "Select a configuration file", suffixes={".cfg"}
+        configs = self._file_picker(
+            "Select one or more configuration files", multi=True, suffixes={".cfg"}
         )
-        if config is None:
+        if not configs:
             return
+        if isinstance(configs, Path):
+            configs = [configs]
+        for config in configs:
+            self._run_configuration(config)
+
+    def _run_configuration(self, config: Path) -> None:
         try:
             campaign = parse_runner_config(config)
         except Exception as error:
@@ -239,7 +254,7 @@ class AspisTui:
         try:
             with _working_directory(config.parent):
                 runner = CampaignRun(campaign, self.environment, config.with_suffix(".log"))
-                runner.run_campaign()
+                self._run_with_progress(runner, config)
         except Exception as error:
             self._message("Campaign interrupted", str(error), error=True)
             return
@@ -251,6 +266,41 @@ class AspisTui:
             )
             return
         self._campaign_summary(config.name, runner.results, runner.log)
+
+    def _run_with_progress(self, runner: CampaignRun, config: Path) -> None:
+        """Keep curses on the main thread while the campaign reports events."""
+        events = Queue()
+        started = time.monotonic()
+        updated = started
+        state = {"index": 0, "total": len(runner.campaign.runs),
+                 "test": "Starting…", "phase": "Preparing campaign", "sources": ""}
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(runner.run_campaign, progress=events.put)
+            while True:
+                try:
+                    state = events.get(timeout=0.2)
+                    updated = time.monotonic()
+                    while True:
+                        state = events.get_nowait()
+                except Empty:
+                    pass
+                now = time.monotonic()
+                elapsed = int(now - started)
+                spinner = "|/-\\"[int((now - started) * 4) % 4]
+                self._frame("ASPIS · Running campaign", "Campaign running · results appear when finished")
+                lines = [
+                    f"{spinner} {config.name}",
+                    f"Test {state['index']}/{state['total']}: {state['test']}",
+                    f"Phase: {state['phase']}",
+                    f"Elapsed: {elapsed // 60:02d}:{elapsed % 60:02d} · Last progress: {int(now - updated)} s ago",
+                    f"Sources: {state['sources']}",
+                ]
+                for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
+                    self._write(row, 3, line)
+                self.screen.refresh()
+                if future.done():
+                    future.result()
+                    return
 
     def _results(self, config: Path, results: list[dict], log: list[str]) -> None:
         if not results:
@@ -437,26 +487,15 @@ class AspisTui:
             elif key in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(sdc_states)
 
-    def _create_configuration(self, batch: bool = False) -> None:
+    def _create_configuration(self) -> None:
         draft = ConfigurationDraft()
-        if batch:
-            if not self._select_batch_directory(draft):
-                return
-        else:
-            programs = self._file_picker(
-                "Select source files (.c, .cpp, .rs)",
-                multi=True,
-                suffixes=SOURCE_SUFFIXES,
-            )
-            if not programs:
-                return
-            draft.programs = [str(path.resolve()) for path in programs]
+        self._edit_draft_field(draft, "programs")
+        if not draft.programs:
+            return
 
         draft = self._configuration_form(
             draft,
-            "ASPIS · New batch configuration"
-            if batch
-            else "ASPIS · New configuration",
+            "ASPIS · New configuration",
         )
         if draft is None:
             return
@@ -480,7 +519,7 @@ class AspisTui:
             return
         self._message(
             "Configuration saved",
-            f"{target}\n\nSource files may be located in any directory.",
+            f"{target}\n\n",
         )
 
     def _edit_configuration(self) -> None:
@@ -598,11 +637,12 @@ class AspisTui:
     def _edit_draft_field(self, draft: ConfigurationDraft, key: str) -> None:
         if key == "programs":
             mode = self._choose(
-                "Source selection", ("Select files", "Batch directory")
+                "Source selection",
+                ("Select files", "Link files together", "Batch directory"),
             )
             if mode == "Batch directory":
                 self._select_batch_directory(draft)
-            elif mode == "Select files":
+            elif mode in {"Select files", "Link files together"}:
                 programs = self._file_picker(
                     "Select source files",
                     multi=True,
@@ -610,12 +650,28 @@ class AspisTui:
                 )
                 if programs:
                     draft.programs = [str(path.resolve()) for path in programs]
-                    draft.batch_directory = ""
+                    bulk_directory = getattr(programs, "batch_directory", None)
+                    if mode == "Select files" and len(programs) > 1:
+                        parents = {path.resolve().parent for path in programs}
+                        independent_root = (
+                            bulk_directory.resolve()
+                            if bulk_directory
+                            else next(iter(parents)) if len(parents) == 1 else self.start_dir
+                        )
+                        draft.batch_directory = str(independent_root)
+                    else:
+                        draft.batch_directory = ""
             return
         if key == "data_mode":
-            value = self._choose("Data protection", DATA_MODES)
+            value = self._choose_many(
+                "Data protection (one or more)", DATA_MODES, _mode_values(draft.data_mode)
+            )
         elif key == "control_mode":
-            value = self._choose("Control-flow protection", CONTROL_MODES)
+            value = self._choose_many(
+                "Control-flow protection (one or more)",
+                CONTROL_MODES,
+                _mode_values(draft.control_mode),
+            )
         elif key == "injection":
             value = self._edit_injection(draft.injection)
         else:
@@ -687,6 +743,7 @@ class AspisTui:
     ):
         current = self.start_dir
         selected: set[Path] = set()
+        bulk_directory: Path | None = None
         index = 0
         offset = 0
         while True:
@@ -714,7 +771,7 @@ class AspisTui:
             footer = (
                 "↑↓/jk move · h parent · Enter/l open · s select directory · Esc cancel"
                 if select_directory
-                else "↑↓/jk move · h parent · Enter/l open · Space select · Esc cancel"
+                else "↑↓/jk move · h parent · Enter/l open · Space select · s all · Esc cancel"
             )
             self._frame(title, footer)
             self._write(2, 3, str(current), curses.color_pair(2))
@@ -728,6 +785,11 @@ class AspisTui:
                 return None
             if select_directory and key in (ord("s"), ord("S")):
                 return current
+            if multi and not select_directory and key in (ord("s"), ord("S")):
+                files = {path for path in entries if path.is_file()}
+                if files:
+                    return FileSelection(sorted(files), current)
+                continue
             if key == ord("h"):
                 current, index, offset = current.parent.resolve(), 0, 0
             elif key in (curses.KEY_UP, ord("k")):
@@ -737,6 +799,7 @@ class AspisTui:
             elif key == ord(" ") and multi and entries[index].is_file():
                 path = entries[index]
                 selected.symmetric_difference_update({path})
+                bulk_directory = None
             elif key in (curses.KEY_ENTER, 10, 13, ord("l")):
                 path = entries[index]
                 if path.is_dir():
@@ -744,8 +807,11 @@ class AspisTui:
                 elif select_directory:
                     continue
                 elif multi:
+                    was_selected = path in selected
                     selected.add(path)
-                    return sorted(selected)
+                    if not was_selected:
+                        bulk_directory = None
+                    return FileSelection(sorted(selected), bulk_directory)
                 else:
                     return path
 
@@ -769,6 +835,41 @@ class AspisTui:
                 selected = (selected + 1) % len(options)
             elif key in (curses.KEY_ENTER, 10, 13):
                 return options[selected]
+
+    def _choose_many(
+        self, title: str, options: Iterable[str], current: Iterable[str] = ()
+    ) -> list[str] | None:
+        options = tuple(options)
+        checked = set(current)
+        selected = 0
+        while True:
+            self._frame(
+                "ASPIS · Configuration",
+                "↑↓/jk move · Space toggle · Enter confirm · Esc cancel",
+            )
+            self._write(3, 3, title, curses.A_BOLD)
+            for index, option in enumerate(options):
+                marker = "✓" if option in checked else " "
+                cursor = "›" if selected == index else " "
+                self._write(
+                    5 + index * 2,
+                    5,
+                    f"{cursor} [{marker}] {option}",
+                    self._selected_attr() if selected == index else 0,
+                )
+            key = self._key()
+            if key == 27:
+                return None
+            if key in (curses.KEY_UP, ord("k")):
+                selected = (selected - 1) % len(options)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected = (selected + 1) % len(options)
+            elif key == ord(" "):
+                checked.symmetric_difference_update({options[selected]})
+            elif key in (curses.KEY_ENTER, 10, 13):
+                if checked:
+                    return [option for option in options if option in checked]
+                self._message("Selection required", "Select at least one option.", error=True)
 
     def _ask_positive(self, title: str, default: str) -> str | None:
         value = self._ask_text(title, default)
@@ -959,7 +1060,10 @@ def _aspis_command_preview(environment: Environment) -> str:
 
 def _draft_field_value(draft: ConfigurationDraft, key: str) -> str:
     if key != "programs":
-        return str(getattr(draft, key))
+        value = getattr(draft, key)
+        if key in {"data_mode", "control_mode"}:
+            return ", ".join(_mode_values(value))
+        return str(value)
     source_count = len(draft.programs)
     source_label = "file" if source_count == 1 else "files"
     if draft.batch_directory:
@@ -976,6 +1080,10 @@ def _draft_errors(draft: ConfigurationDraft) -> list[str]:
         errors.append("Name: use letters, numbers, underscores, or hyphens only.")
     if not draft.programs:
         errors.append("Select at least one source file.")
+    if not _mode_values(draft.data_mode):
+        errors.append("Select at least one data-protection mode.")
+    if not _mode_values(draft.control_mode):
+        errors.append("Select at least one control-flow-protection mode.")
     for program in draft.programs:
         path = Path(program)
         if path.suffix.lower() not in SOURCE_SUFFIXES:
@@ -1020,31 +1128,48 @@ def _configuration_text(
 
 def _draft_text(draft: ConfigurationDraft) -> str:
     programs = draft.programs if draft.batch_directory else [draft.programs]
+    modes = list(product(
+        _mode_values(draft.data_mode), _mode_values(draft.control_mode)
+    ))
     blocks = []
     used_names = set()
+    multiple_modes = len(modes) > 1
     for index, item in enumerate(programs, start=1):
         run_programs = [item] if draft.batch_directory else item
-        name = draft.name
+        base_name = draft.name
         if draft.batch_directory:
             stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(item).stem).strip("-")
-            name = f"{draft.name}-{stem or index}"
-            if name in used_names:
-                name = f"{name}-{index}"
+            base_name = f"{draft.name}-{stem or index}"
+        for data_mode, control_mode in modes:
+            name = base_name
+            if multiple_modes:
+                name = f"{name}-{data_mode}-{control_mode}"
+            candidate = name
+            duplicate = 2
+            while candidate in used_names:
+                candidate = f"{name}-{duplicate}"
+                duplicate += 1
+            name = candidate
             used_names.add(name)
-        blocks.append(
-            _configuration_text(
-                name,
-                run_programs,
-                draft.data_mode,
-                draft.control_mode,
-                draft.timeout,
-                draft.repetitions,
-                draft.compiler_flags,
-                draft.injection,
-                draft.functions,
-            ).rstrip()
-        )
+            blocks.append(
+                _configuration_text(
+                    name,
+                    run_programs,
+                    data_mode,
+                    control_mode,
+                    draft.timeout,
+                    draft.repetitions,
+                    draft.compiler_flags,
+                    draft.injection,
+                    draft.functions,
+                ).rstrip()
+            )
     return "\n".join(blocks) + "\n"
+
+
+def _mode_values(value: str | Iterable[str]) -> list[str]:
+    """Normalize old single-value drafts and new multi-value drafts."""
+    return [value] if isinstance(value, str) else list(value)
 
 
 def _campaign_from_draft(draft: ConfigurationDraft) -> Campaign:
@@ -1090,8 +1215,8 @@ def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
     return ConfigurationDraft(
         name=run.name,
         programs=list(run.programs),
-        data_mode=run.data_protection.name.lower(),
-        control_mode=run.control_flow_protection.name.lower().replace("_", "-"),
+        data_mode=[run.data_protection.name.lower()],
+        control_mode=[run.control_flow_protection.name.lower().replace("_", "-")],
         timeout=str(run.timeout_ms),
         repetitions=str(run.execution_repetitions),
         compiler_flags=", ".join(run.compiler_flags),

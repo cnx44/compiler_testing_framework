@@ -489,10 +489,24 @@ class CampaignRun:
         self.log = []
         self.results: list[dict] = []
 
-    def run_campaign(self, args: list[str] | None = None):
+    def run_campaign(self, args: list[str] | None = None, progress=None):
+        import json
+        from datetime import datetime
+
         self.log = []
         self.results = []
-        for run in self.campaign.runs:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.summary_path = self.log_path.with_name(
+            f"campaign_summary_{timestamp}.json"
+        )
+        def report(phase):
+            if progress is not None:
+                progress({"test": run.name, "index": run_index,
+                          "total": len(self.campaign.runs), "phase": phase,
+                          "sources": ", ".join(run.programs)})
+
+        for run_index, run in enumerate(self.campaign.runs, start=1):
+            report("Preparing test")
             self.log.append(f"RUN NAME: {run.name}")
             entry_source = self._entry_source(run.programs)
             if entry_source is None:
@@ -531,15 +545,19 @@ class CampaignRun:
 
                 # Build both variants before executing either one. This keeps the
                 # selected ASPIS protection modes tied to this campaign run.
+                report("Compiling Oracle")
                 oracle_runner.compile(run.programs, run.compiler_flags)
+                report("Compiling ASPIS")
                 aspis_runner.compile(run.programs, run.compiler_flags)
 
+                report(f"Oracle execution ({run.execution_repetitions} repetitions) and debugger snapshot")
                 oracle_results = oracle_runner.execute(
                     run_args,
                     vars_to_check,
                     run.execution_repetitions,
                     functions_to_check,
                 )
+                report(f"ASPIS execution ({run.execution_repetitions} repetitions) and debugger snapshot")
                 aspis_results = aspis_runner.execute(
                     run_args,
                     vars_to_check,
@@ -551,6 +569,13 @@ class CampaignRun:
                 )
                 injections = []
                 def _run_inj(inj):
+                    start_count = len(injections)
+                    failures = []
+                    def injection_progress(label):
+                        report(f"{label}: {target_function.name} · "
+                               f"{len(injections) - start_count}/{run.execution_repetitions} injections "
+                               f"· {len(failures)} failed attempts")
+                    injection_progress("Profiling / fault injection")
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         futures = [
                             executor.submit(inj.run, run_args)
@@ -562,7 +587,38 @@ class CampaignRun:
                                 injections.append(result)
                                 self.log.append(f"Injection result: {result}")
                             except Exception as e:
-                                self.log.append(f"Injection error: {e}")
+                                failures.append(e)
+                            injection_progress("Fault injection")
+
+                    # Debugger startup/profiling can fail transiently under a
+                    # highly concurrent campaign. Replace failed attempts so
+                    # every result always contains the configured sample size.
+                    retry_budget = run.execution_repetitions
+                    while (
+                        len(injections) - start_count < run.execution_repetitions
+                        and retry_budget > 0
+                    ):
+                        retry_budget -= 1
+                        injection_progress("Retrying injection")
+                        try:
+                            result = inj.run(run_args)
+                            injections.append(result)
+                            self.log.append(f"Injection retry result: {result}")
+                        except Exception as error:
+                            failures.append(error)
+                        injection_progress("Fault injection")
+                    completed = len(injections) - start_count
+                    if completed != run.execution_repetitions:
+                        details = str(failures[-1]) if failures else "unknown error"
+                        raise RuntimeError(
+                            "Injection campaign incomplete: "
+                            f"expected {run.execution_repetitions}, got {completed}. "
+                            f"Last error: {details}"
+                        )
+                    if failures:
+                        self.log.append(
+                            f"Recovered {len(failures)} transient injection error(s)."
+                        )
 
                 for target_function in run.functions:
                     injectors = BaseInjector.create_for_target(
@@ -577,6 +633,7 @@ class CampaignRun:
                     for injector in injectors:
                         _run_inj(injector)
 
+                report("Classifying results")
                 # Classify injection results
                 from src.models import TerminationEvent
                 injection_summary = {
@@ -642,12 +699,9 @@ class CampaignRun:
                     }
                 )
 
+                report("Saving analysis")
                 # Save results to JSON
-                import json
-                from datetime import datetime
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                json_path = self.log_path.with_name(f"campaign_summary_{timestamp}.json")
-                with open(json_path, "w", encoding="utf-8") as f:
+                with open(self.summary_path, "w", encoding="utf-8") as f:
                     json.dump(self.results, f, indent=2)
 
                 self.log.extend(

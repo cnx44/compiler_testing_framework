@@ -571,10 +571,11 @@ class CampaignRunTest(unittest.TestCase):
             ]
         )
 
+    @patch("src.campaign_runner.BaseInjector.create_for_target", return_value=[])
     @patch("src.campaign_runner.AspisRunner")
     @patch("src.campaign_runner.OracleRunner")
     def test_runs_both_variants_with_same_programs_and_arguments(
-        self, oracle_class, aspis_class
+        self, oracle_class, aspis_class, create_injectors
     ):
         oracle_results = {
             "returncode": 0,

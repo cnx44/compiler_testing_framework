@@ -248,6 +248,8 @@ class BaseInjector(ABC):
                     command,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     env=run_env,
                     timeout=self.timeout_ms / 1000.0,
                     stdin=subprocess.DEVNULL,
@@ -312,7 +314,11 @@ class BaseInjector(ABC):
     def _extract_state(self, stdout: str, stderr: str, inferior_out: Path) -> ExecutionState:
         """Parses the GDB output to extract variables and registers into a typed state."""
         state = ExecutionState(
-            stdout=inferior_out.read_text().strip() if inferior_out.exists() else "",
+            stdout=(
+                inferior_out.read_text(encoding="utf-8", errors="replace").strip()
+                if inferior_out.exists()
+                else ""
+            ),
             stderr=stderr,
             debugger_output=stdout
         )

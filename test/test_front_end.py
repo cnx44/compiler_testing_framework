@@ -8,6 +8,7 @@ from src.env import Environment
 from src.front_end import (
     AspisTui,
     ConfigurationDraft,
+    FileSelection,
     _QuitTui,
     _aspis_command_preview,
     _campaign_from_draft,
@@ -33,6 +34,30 @@ from src.config_parser import (
 
 
 class FrontEndSupportTest(unittest.TestCase):
+    def test_running_screen_displays_progress_before_worker_finishes(self):
+        from threading import Event
+
+        rendered = Event()
+        tui = AspisTui(Environment())
+        tui.screen = MagicMock()
+        tui.screen.getmaxyx.return_value = (30, 120)
+        runner = MagicMock()
+
+        def run_campaign(*, progress):
+            progress({"test": "example", "index": 2, "total": 4,
+                      "phase": "Compiling ASPIS", "sources": "main.c"})
+            if not rendered.wait(3):
+                raise AssertionError("UI did not update while compilation was running")
+
+        def write(row, col, line):
+            if "Compiling ASPIS" in line:
+                rendered.set()
+
+        runner.run_campaign.side_effect = run_campaign
+        with patch.object(tui, "_frame"), patch.object(tui, "_write", side_effect=write):
+            tui._run_with_progress(runner, Path("campaign.cfg"))
+        self.assertTrue(rendered.is_set())
+
     def test_colon_q_exits_from_any_tui_screen(self):
         tui = AspisTui(Environment())
         tui.screen = MagicMock()
@@ -126,6 +151,111 @@ class FrontEndSupportTest(unittest.TestCase):
             self.assertEqual(run.compiler_flags, ["-O2", "-lm"])
             self.assertEqual(run.injection, MemoryInjection())
 
+    def test_draft_creates_cartesian_product_of_aspis_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "main.c"
+            source.touch()
+            draft = ConfigurationDraft(
+                name="matrix",
+                programs=[str(source)],
+                data_mode=["eddi", "seddi"],
+                control_mode=["cfcss", "none"],
+            )
+
+            runs = _campaign_from_draft(draft).runs
+
+        self.assertEqual(len(runs), 4)
+        self.assertEqual(
+            [run.name for run in runs],
+            [
+                "matrix-eddi-cfcss",
+                "matrix-eddi-none",
+                "matrix-seddi-cfcss",
+                "matrix-seddi-none",
+            ],
+        )
+
+    def test_file_picker_s_selects_all_visible_source_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = [root / "a.c", root / "b.cpp", root / "c.rs"]
+            for source in sources:
+                source.touch()
+            (root / "ignored.txt").touch()
+            tui = AspisTui(Environment(), start_dir=root)
+            tui.screen = MagicMock()
+            with (
+                patch.object(tui, "_frame"),
+                patch.object(tui, "_write"),
+                patch.object(tui, "_height", return_value=30),
+                patch.object(tui, "_key", return_value=ord("s")),
+                patch("src.front_end.curses.color_pair", return_value=0),
+            ):
+                selected = tui._file_picker(
+                    "sources", multi=True, suffixes={".c", ".cpp", ".rs"}
+                )
+
+        self.assertEqual(selected, sources)
+        self.assertEqual(selected.batch_directory, root)
+
+    def test_select_all_sources_creates_independent_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = [root / "first.c", root / "second.c"]
+            for source in sources:
+                source.touch()
+            selection = FileSelection(sources, root)
+            tui = AspisTui(Environment(), start_dir=root)
+            draft = ConfigurationDraft(name="all")
+            with (
+                patch.object(tui, "_choose", return_value="Select files"),
+                patch.object(tui, "_file_picker", return_value=selection),
+            ):
+                tui._edit_draft_field(draft, "programs")
+
+            runs = _campaign_from_draft(draft).runs
+
+        self.assertEqual([run.name for run in runs], ["all-first", "all-second"])
+        self.assertEqual([len(run.programs) for run in runs], [1, 1])
+
+    def test_selecting_multiple_files_creates_independent_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = [root / "first.c", root / "second.c"]
+            for source in sources:
+                source.touch()
+            tui = AspisTui(Environment(), start_dir=root)
+            draft = ConfigurationDraft(name="selected")
+            with (
+                patch.object(tui, "_choose", return_value="Select files"),
+                patch.object(tui, "_file_picker", return_value=sources),
+            ):
+                tui._edit_draft_field(draft, "programs")
+
+            runs = _campaign_from_draft(draft).runs
+
+        self.assertEqual([run.name for run in runs], ["selected-first", "selected-second"])
+        self.assertEqual([len(run.programs) for run in runs], [1, 1])
+
+    def test_link_files_together_keeps_one_program(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = [root / "main.c", root / "helper.c"]
+            for source in sources:
+                source.touch()
+            tui = AspisTui(Environment(), start_dir=root)
+            draft = ConfigurationDraft(name="linked")
+            with (
+                patch.object(tui, "_choose", return_value="Link files together"),
+                patch.object(tui, "_file_picker", return_value=sources),
+            ):
+                tui._edit_draft_field(draft, "programs")
+
+            runs = _campaign_from_draft(draft).runs
+
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].programs, [str(path) for path in sources])
+
     def test_existing_run_round_trip_keeps_all_editable_fields(self):
         run = RunnerTest(
             name="existing",
@@ -173,6 +303,7 @@ class FrontEndSupportTest(unittest.TestCase):
             tui = AspisTui(Environment(), start_dir=Path(directory))
             tui.screen = MagicMock()
             failed_runner = MagicMock()
+            tui.screen.getmaxyx.return_value = (30, 120)
             failed_runner.results = []
             failed_runner.log = ["RUN NAME: broken", "ERROR: compiler failed"]
             with (
