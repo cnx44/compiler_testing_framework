@@ -538,6 +538,10 @@ class CampaignRun:
             )
 
             try:
+                if all(Path(p).suffix.lower() == ".rs" for p in run.programs):
+                    raise ValueError("Configuration: Rust symbol selection is supported, but this runner requires a C/C++ compilation toolchain.")
+                for target in run.functions:
+                    oracle_runner._debug_function_name(target.name)
                 vars_to_check = [
                     var.name for tf in run.functions for var in tf.variables
                 ]
@@ -707,6 +711,8 @@ class CampaignRun:
                 self.log.extend(
                     self._comparison_lines(oracle_results, aspis_results, vars_to_check)
                 )
+            except (ValueError, FileNotFoundError) as error:
+                self.log.append(f"ERROR: CONFIGURATION [{run.name}]: {error}")
             except Exception as error:
                 self.log.append(f"ERROR: {error}")
             finally:

@@ -622,6 +622,44 @@ il numero di `ExecutionResult` effettivamente raccolti.
 
 ## Uso della TUI
 
+### Selezione dei simboli per sorgente (Tree-sitter)
+
+Installare le dipendenze aggiornate con `python -m pip install -r requirements.txt`.
+Nel campo **Functions/variables** un menu elenca i file con lo scope corrente.
+Il valore iniziale è `main` per tutti: si può salvare senza aprire questo menu.
+Aprire soltanto i file da personalizzare; **Browse source symbols** analizza il
+file C, C++ o Rust senza compilazione: scegliere le funzioni, poi i parametri e
+le locali oppure le globali (`@G`). È possibile confermare senza variabili e
+modificare il testo finale, ad esempio `main(x:4, @G)`. Le liste scorrono con
+le frecce; Space seleziona ed Enter conferma.
+
+La scelta viene fatta una volta per sorgente indipendente e riutilizzata per
+tutte le combinazioni ASPIS e injection. **Use main for all files** applica
+`main` senza target a tutti; **Enter manually** modifica lo scope del file scelto.
+Dopo ogni modifica si torna all'elenco. **Done** o Esc chiude il menu mantenendo
+le modifiche; annullare l'editor di un singolo file conserva il suo scope precedente.
+Le locali sono target dell'injection memory, le globali dell'injection global.
+Con **Link files together**, le funzioni selezionate appartengono allo stesso
+eseguibile: i nomi devono essere non ambigui nel debugger.
+
+L'analisi è sintattica: commenti e stringhe non diventano simboli. Macro non
+espanse, overload, namespace, classi, template e impl Rust possono richiedere
+configurazione manuale; i casi omessi sono segnalati. La disponibilità di una
+locale dipende dal punto di arresto e dallo scope del debugger. Le lunghezze
+degli array si specificano manualmente; le selezioni non garantiscono che una
+variabile sia disponibile durante l'injection. Il supporto Rust qui riguarda
+la selezione dei simboli: il runner attuale richiede ancora sorgenti C/C++.
+
+Gli errori di lettura/sintassi di un `.cfg` avviato dalla TUI vengono aggiunti al
+relativo `.log` come `ERROR: CONFIGURATION`, mostrando anche un messaggio.
+Durante la campagna, errori di configurazione quali sorgenti mancanti e nomi
+di funzione non validi sono distinti dagli errori operativi; gli altri test
+continuano. Errori dell'analizzatore mostrano il motivo e aprono l'input manuale.
+Tempi e injection restano nello stesso flusso.
+
+L'integrazione usa i [binding Python ufficiali Tree-sitter](https://tree-sitter.github.io/py-tree-sitter/)
+con le grammatiche dedicate C, C++ e Rust.
+
 Avvio:
 
 ```shell
@@ -637,6 +675,12 @@ La UI è in inglese. I comandi comuni sono:
 - `Space`: selezione multipla dei file;
 - `Esc` o, dove indicato, `q`: ritorno o uscita;
 - `s`: selezione della directory corrente nel picker delle directory.
+
+I selettori multipli usano `[ ]` per gli elementi disponibili e `[✓]` per quelli
+selezionati, anche nel picker dei sorgenti. In **Fault injection**, Enter o Space
+attivano/disattivano una voce e **Done** conferma. **Register · all registers**
+scrive `register data_only: false` nel `.cfg`; **Register · data registers only**
+scrive `register data_only: true`. Sono due opzioni distinte, non un refuso.
 
 ### Run campaign
 

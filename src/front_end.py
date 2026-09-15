@@ -37,6 +37,7 @@ from src.config_parser import (
     parse_runner_config,
 )
 from src.env import Environment
+from src.source_symbols import analyze_source, SourceAnalysisError
 
 
 DATA_MODES = ("eddi", "seddi", "fdsc", "none")
@@ -242,6 +243,11 @@ class AspisTui:
         try:
             campaign = parse_runner_config(config)
         except Exception as error:
+            try:
+                with config.with_suffix(".log").open("a", encoding="utf-8") as log:
+                    log.write(f"\nERROR: CONFIGURATION [{config}]: {error}\n")
+            except OSError as log_error:
+                self._message("Unable to write configuration log", str(log_error), error=True)
             self._message("Invalid configuration", str(error), error=True)
             return
 
@@ -646,10 +652,6 @@ class AspisTui:
                 if selected == save_index:
                     errors = _draft_errors(draft)
                     if not errors:
-                        if draft.batch_directory and len(draft.programs) > 1 and not isinstance(draft.functions, dict):
-                            self._edit_draft_field(draft, "functions")
-                            if not isinstance(draft.functions, dict):
-                                continue
                         try:
                             _validate_config_text(_draft_text(draft))
                         except Exception as error:
@@ -704,28 +706,8 @@ class AspisTui:
             )
         elif key == "injection":
             value = self._edit_injection(_mode_values(draft.injection))
-        elif key == "functions" and draft.batch_directory and len(draft.programs) > 1:
-            mode = self._choose("Function configuration", ("Apply same function to all files", "Specify per-file"))
-            if mode is None:
-                return
-                
-            functions_map = {}
-            if mode == "Apply same function to all files":
-                funcs = self._ask_text("Function for all files", "main")
-                if funcs is None:
-                    return
-                for program in draft.programs:
-                    functions_map[program] = funcs
-            else:
-                for program in draft.programs:
-                    prog_name = Path(program).name
-                    current_func = draft.functions.get(program, "main") if isinstance(draft.functions, dict) else draft.functions
-                    funcs = self._ask_text(f"Functions for {prog_name}", current_func)
-                    if funcs is None:
-                        return
-                    functions_map[program] = funcs
-                    
-            draft.functions = functions_map
+        elif key == "functions":
+            self._scope_menu(draft)
             return
         else:
             labels = {
@@ -743,60 +725,74 @@ class AspisTui:
         if value is not None:
             setattr(draft, key, value)
 
-    def _edit_injection(self, current: list[str]) -> list[str] | None:
-        new_injections = list(current)
+    def _scope_menu(self, draft: ConfigurationDraft) -> None:
+        scopes = {p: draft.functions.get(p, "main")
+                  if isinstance(draft.functions, dict) else draft.functions
+                  for p in draft.programs}
         while True:
-            options = [f" {inj}" for inj in new_injections]
-            
-            has_reg_true = "register data_only: true" in new_injections
-            has_reg_false = "register data_only: false" in new_injections
-            has_memory = "memory" in new_injections
-            has_global = "global" in new_injections
-            
-            if not (has_reg_true and has_reg_false):
-                options.append("[Add Register Injection]")
-            if not has_memory:
-                options.append("[Add Memory Injection]")
-            if not has_global:
-                options.append("[Add Global Injection]")
-                
-            if new_injections:
-                options.append("[Remove Injection...]")
-            options.append("[Done]")
-            
-            choice = self._choose("Edit Fault Injections", options)
-            if choice is None:
-                return current
-            
-            if choice == "[Done]":
-                if not new_injections:
-                    self._message("Error", "At least one injection mode is required.", error=True)
-                    continue
-                return new_injections
-                
-            elif choice == "[Add Register Injection]":
-                avail = []
-                if not has_reg_true: avail.append("true")
-                if not has_reg_false: avail.append("false")
-                
-                if len(avail) == 1:
-                    data_only = avail[0]
-                else:
-                    data_only = self._choose("Inject data registers only?", tuple(avail))
-                    
-                if data_only is not None:
-                    new_injections.append(f"register data_only: {data_only}")
-            
-            elif choice == "[Add Memory Injection]":
-                new_injections.append("memory")
-                
-            elif choice == "[Add Global Injection]":
-                new_injections.append("global")
-                
-            elif choice == "[Remove Injection...]":
-                to_remove = self._choose("Select injection to remove", new_injections)
-                if to_remove is not None:
-                    new_injections.remove(to_remove)
+            labels = {f"{i + 1}. {p} · {scopes[p]}": p
+                      for i, p in enumerate(draft.programs)}
+            choice = self._choose("Scopes per file (default: main)",
+                                  [*labels, "Use main for all files", "Done"])
+            if choice is None or choice == "Done":
+                draft.functions = scopes
+                return
+            if choice == "Use main for all files":
+                scopes = dict.fromkeys(draft.programs, "main")
+                continue
+            program = labels[choice]
+            mode = self._choose(Path(program).name,
+                                ("Browse source symbols", "Enter manually", "Reset to main"))
+            if mode == "Browse source symbols":
+                value = self._source_scope(Path(program), scopes[program])
+            elif mode == "Enter manually":
+                value = self._ask_text("Scope: main(x, @G)", scopes[program])
+            elif mode == "Reset to main":
+                value = "main"
+            else:
+                continue
+            if value is not None:
+                scopes[program] = value
+
+    def _source_scope(self, path: Path, current: str) -> str | None:
+        try:
+            symbols = analyze_source(path)
+            if symbols.warnings:
+                self._message("Source analysis limitations", "\n".join(symbols.warnings))
+            if not symbols.functions:
+                raise SourceAnalysisError("No unambiguous functions available.")
+        except SourceAnalysisError as error:
+            self._message("Source analysis unavailable", str(error), error=True)
+            return self._ask_text(f"Manual scope for {path.name}: main(x, @G)", current)
+        labels = {f"{f.name} · line {f.line}": f for f in symbols.functions}
+        chosen = self._choose_many(f"{path.name}: functions", labels)
+        if chosen is None:
+            return None
+        scopes = []
+        for label in chosen:
+            function = labels[label]
+            options = [*function.variables, *("@" + name for name in symbols.globals)]
+            variables = self._choose_many(
+                f"{function.name}: targets (locals / @globals); Enter allows none",
+                options, allow_empty=True,
+            ) if options else []
+            if variables is None:
+                return None
+            scopes.append(function.name + ("(" + ", ".join(variables) + ")" if variables else ""))
+        return self._ask_text(f"Confirm scope for {path.name} (optional array length: x:4)", ", ".join(scopes))
+
+    def _edit_injection(self, current: list[str]) -> list[str] | None:
+        return self._choose_many(
+            "Fault injection",
+            ("register data_only: false", "register data_only: true", "memory", "global"),
+            current, toggle_enter=True,
+            labels={
+                "register data_only: false": "Register · all registers",
+                "register data_only: true": "Register · data registers only",
+                "memory": "Memory · local variables",
+                "global": "Global · global variables",
+            },
+        )
 
     def _select_batch_directory(self, draft: ConfigurationDraft) -> bool:
         directory = self._file_picker(
@@ -864,7 +860,7 @@ class AspisTui:
             for row, path in enumerate(entries[offset:offset + view_height], start=4):
                 actual = offset + row - 4
                 label = "[..]" if path == current.parent else (f"[{path.name}]" if path.is_dir() else path.name)
-                check = "✓ " if path in selected else "  "
+                check = f"[{'✓' if path in selected else ' '}] " if multi and path.is_file() else "    "
                 self._write(row, 3, check + label, self._selected_attr() if actual == index else 0)
             key = self._key()
             if key in (27, ord("q")):
@@ -910,8 +906,11 @@ class AspisTui:
                 "↑↓/jk select · Enter confirm · Esc cancel",
             )
             self._write(3, 3, title, curses.A_BOLD)
-            for index, option in enumerate(options):
-                self._write(5 + index * 2, 5, f"{'›' if selected == index else ' '} {option}", self._selected_attr() if selected == index else 0)
+            height = max(1, self._height() - 9)
+            offset = max(0, selected - height + 1)
+            for index in range(offset, min(len(options), offset + height)):
+                option = options[index]
+                self._write(5 + index - offset, 5, f"{'›' if selected == index else ' '} {option}", self._selected_attr() if selected == index else 0)
             key = self._key()
             if key == 27:
                 return None
@@ -923,37 +922,44 @@ class AspisTui:
                 return options[selected]
 
     def _choose_many(
-        self, title: str, options: Iterable[str], current: Iterable[str] = ()
+        self, title: str, options: Iterable[str], current: Iterable[str] = (), allow_empty: bool = False,
+        toggle_enter: bool = False, labels: dict[str, str] | None = None,
     ) -> list[str] | None:
         options = tuple(options)
         checked = set(current)
+        row_count = len(options) + int(toggle_enter)
         selected = 0
         while True:
             self._frame(
                 "ASPIS · Configuration",
-                "↑↓/jk move · Space toggle · Enter confirm · Esc cancel",
+                ("↑↓/jk move · Enter/Space toggle · Done confirm · Esc cancel"
+                 if toggle_enter else "↑↓/jk move · Space toggle · Enter confirm · Esc cancel"),
             )
             self._write(3, 3, title, curses.A_BOLD)
-            for index, option in enumerate(options):
+            height = max(1, self._height() - 9)
+            offset = max(0, selected - height + 1)
+            for index in range(offset, min(row_count, offset + height)):
+                option = options[index] if index < len(options) else "Done"
                 marker = "✓" if option in checked else " "
                 cursor = "›" if selected == index else " "
                 self._write(
-                    5 + index * 2,
+                    5 + index - offset,
                     5,
-                    f"{cursor} [{marker}] {option}",
+                    f"{cursor} [{marker}] {(labels or {}).get(option, option)}",
                     self._selected_attr() if selected == index else 0,
                 )
             key = self._key()
             if key == 27:
                 return None
             if key in (curses.KEY_UP, ord("k")):
-                selected = (selected - 1) % len(options)
+                selected = (selected - 1) % max(1, row_count)
             elif key in (curses.KEY_DOWN, ord("j")):
-                selected = (selected + 1) % len(options)
-            elif key == ord(" "):
+                selected = (selected + 1) % max(1, row_count)
+            elif selected < len(options) and (key == ord(" ") or
+                    (toggle_enter and key in (curses.KEY_ENTER, 10, 13))):
                 checked.symmetric_difference_update({options[selected]})
-            elif key in (curses.KEY_ENTER, 10, 13):
-                if checked:
+            elif key in (curses.KEY_ENTER, 10, 13) or (toggle_enter and key == ord(" ")):
+                if checked or allow_empty:
                     return [option for option in options if option in checked]
                 self._message("Selection required", "Select at least one option.", error=True)
 
@@ -1239,7 +1245,12 @@ def _draft_text(draft: ConfigurationDraft) -> str:
                 duplicate += 1
             name = candidate
             used_names.add(name)
-            file_functions = draft.functions.get(item, "") if isinstance(draft.functions, dict) else draft.functions
+            if isinstance(draft.functions, dict):
+                file_functions = (draft.functions.get(item, "main") if draft.batch_directory
+                                  else ", ".join(dict.fromkeys(
+                                      draft.functions.get(p, "main") for p in run_programs)))
+            else:
+                file_functions = draft.functions
             blocks.append(
                 _configuration_text(
                     name,

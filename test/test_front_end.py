@@ -34,6 +34,84 @@ from src.config_parser import (
 
 
 class FrontEndSupportTest(unittest.TestCase):
+    def test_source_picker_and_injection_use_checkbox_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.c").touch()
+            tui = AspisTui(Environment(), start_dir=root)
+            tui.screen = MagicMock()
+            tui.screen.getmaxyx.return_value = (30, 120)
+            displayed = []
+            with (
+                patch.object(tui, "_frame"),
+                patch.object(tui, "_write", side_effect=lambda row, col, label, *args: displayed.append(label)),
+                patch.object(tui, "_selected_attr", return_value=0),
+                patch("src.front_end.curses.color_pair", return_value=0),
+                patch.object(tui, "_key", side_effect=[27]),
+            ):
+                tui._file_picker("Sources", multi=True, suffixes={".c"})
+            self.assertTrue(any("[ ] main.c" in label for label in displayed))
+
+            displayed.clear()
+            with (
+                patch.object(tui, "_frame"),
+                patch.object(tui, "_write", side_effect=lambda row, col, label, *args: displayed.append(label)),
+                patch.object(tui, "_selected_attr", return_value=0),
+                patch.object(tui, "_key", side_effect=[27]),
+            ):
+                tui._edit_injection(["register data_only: false"])
+            self.assertTrue(any("[✓] Register · all registers" in label for label in displayed))
+            self.assertTrue(any("[ ] Register · data registers only" in label for label in displayed))
+
+    def test_injection_enter_and_space_toggle_off_and_on(self):
+        tui = AspisTui(Environment())
+        keys = [10, ord(" "), 10, ord("j"), ord("j"), 10,
+                ord(" "), ord(" "), ord("j"), ord("j"), 10]
+        with (patch.object(tui, "_frame"), patch.object(tui, "_write"),
+              patch.object(tui, "_height", return_value=30),
+              patch.object(tui, "_selected_attr", return_value=0),
+              patch.object(tui, "_key", side_effect=keys)):
+            result = tui._edit_injection(["register data_only: false"])
+        self.assertEqual(result, ["memory"])
+
+    def test_scope_menu_edits_only_selected_file(self):
+        draft = ConfigurationDraft(programs=["a.c", "b.c"], batch_directory=".")
+        tui = AspisTui(Environment())
+        choices = iter(["2. b.c · main", "Enter manually", "Done"])
+        with patch.object(tui, "_choose", side_effect=lambda *args: next(choices)), \
+             patch.object(tui, "_ask_text", return_value="work(x, @G)") as ask:
+            tui._scope_menu(draft)
+        self.assertEqual(draft.functions, {"a.c": "main", "b.c": "work(x, @G)"})
+        ask.assert_called_once()
+
+    def test_scope_menu_cancel_keeps_existing_scope_and_defaults_new_file(self):
+        draft = ConfigurationDraft(programs=["a.c", "b.c"], functions={"a.c": "work(x)"})
+        tui = AspisTui(Environment())
+        with patch.object(tui, "_choose", return_value=None):
+            tui._scope_menu(draft)
+        self.assertEqual(draft.functions, {"a.c": "work(x)", "b.c": "main"})
+
+    def test_invalid_config_is_written_to_run_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "broken.cfg"
+            config.write_text("invalid configuration")
+            tui = AspisTui(Environment())
+            with patch.object(tui, "_message") as message:
+                tui._run_configuration(config)
+            self.assertIn("ERROR: CONFIGURATION", config.with_suffix(".log").read_text())
+            message.assert_called_once()
+
+    def test_source_scope_selection_preserves_global_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "main.c"
+            source.write_text("int G; int main() { int x = 1; return x; }")
+            tui = AspisTui(Environment())
+            with (
+                patch.object(tui, "_choose_many", side_effect=[["main · line 1"], ["x", "@G"]]),
+                patch.object(tui, "_ask_text", side_effect=lambda title, default: default),
+            ):
+                self.assertEqual(tui._source_scope(source, "main"), "main(x, @G)")
+
     def test_running_screen_displays_progress_before_worker_finishes(self):
         from threading import Event
 
@@ -168,10 +246,10 @@ class FrontEndSupportTest(unittest.TestCase):
         self.assertEqual(
             [run.name for run in runs],
             [
-                "matrix-eddi-cfcss",
-                "matrix-eddi-none",
-                "matrix-seddi-cfcss",
-                "matrix-seddi-none",
+                "matrix-eddi-cfcss-register",
+                "matrix-eddi-none-register",
+                "matrix-seddi-cfcss-register",
+                "matrix-seddi-none-register",
             ],
         )
 
