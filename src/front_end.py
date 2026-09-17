@@ -71,6 +71,8 @@ class ConfigurationDraft:
     control_mode: str | list[str] = field(default_factory=lambda: ["cfcss"])
     timeout: str = str(DEFAULT_TIMEOUT_MS)
     repetitions: str = "100"
+    measure_overhead: bool = True
+    measurement_repetitions: str = ""
     compiler_flags: str = "-lm"
     injection: str | list[str] = field(default_factory=lambda: ["register data_only: false"])
     functions: str | dict[str, str] = "main"
@@ -597,6 +599,8 @@ class AspisTui:
             ("control_mode", "Control-flow protection"),
             ("timeout", "Per-process timeout (ms)"),
             ("repetitions", "Execution repetitions"),
+            ("measurement_repetitions", "Measurement repetitions"),
+            ("measure_overhead", "Measure overhead"),
             ("compiler_flags", "Compiler/linker flags"),
             ("injection", "Fault injection"),
             ("functions", "Functions/variables"),
@@ -709,18 +713,25 @@ class AspisTui:
         elif key == "functions":
             self._scope_menu(draft)
             return
+        elif key == "measure_overhead":
+            choice = self._choose("Measure overhead", ["Yes", "No"])
+            if choice:
+                value = choice == "Yes"
+            else:
+                value = None
         else:
             labels = {
                 "name": "Test name",
                 "timeout": "Per-process timeout in milliseconds",
                 "repetitions": "Execution repetitions",
+                "measurement_repetitions": "Measurement reps (empty = same as execution reps)",
                 "compiler_flags": "Comma-separated compiler/linker flags",
                 "functions": "Functions/variables, e.g. main(x:4), helper",
             }
             value = self._ask_text(
                 labels[key],
                 str(getattr(draft, key)),
-                allow_empty=key in {"compiler_flags", "functions"},
+                allow_empty=key in {"compiler_flags", "functions", "measurement_repetitions"},
             )
         if value is not None:
             setattr(draft, key, value)
@@ -1190,6 +1201,8 @@ def _draft_errors(draft: ConfigurationDraft) -> list[str]:
     ):
         if not value.isdigit() or int(value) < 1:
             errors.append(f"{label}: enter a positive integer.")
+    if draft.measurement_repetitions and (not draft.measurement_repetitions.isdigit() or int(draft.measurement_repetitions) < 1):
+        errors.append("Measurement repetitions: enter a positive integer or leave empty.")
     return errors
 
 
@@ -1200,6 +1213,8 @@ def _configuration_text(
     control_mode,
     timeout,
     repetitions,
+    measure_overhead,
+    measurement_repetitions,
     flags,
     injection,
     functions,
@@ -1212,6 +1227,10 @@ def _configuration_text(
         f"timeout_ms: {timeout}",
         f"execution_repetitions: {repetitions}",
     ]
+    if not measure_overhead:
+        lines.append("measure_overhead: false")
+    if measurement_repetitions:
+        lines.append(f"measurement_repetitions: {measurement_repetitions}")
     if flags:
         lines.append(f"compiler_flags: [{flags}]")
     lines.append(f"injection: {injection}")
@@ -1259,6 +1278,8 @@ def _draft_text(draft: ConfigurationDraft) -> str:
                     control_mode,
                     draft.timeout,
                     draft.repetitions,
+                    draft.measure_overhead,
+                    draft.measurement_repetitions,
                     draft.compiler_flags,
                     injection,
                     file_functions,
@@ -1315,6 +1336,8 @@ def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
         control_mode=[run.control_flow_protection.name.lower().replace("_", "-")],
         timeout=str(run.timeout_ms),
         repetitions=str(run.execution_repetitions),
+        measure_overhead=run.measure_overhead,
+        measurement_repetitions=str(run.measurement_repetitions) if run.measurement_repetitions is not None else "",
         compiler_flags=", ".join(run.compiler_flags),
         injection=[injection],
         functions=functions,

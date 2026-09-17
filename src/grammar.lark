@@ -1,9 +1,11 @@
 campaign: test+
 
-test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL timeout? execution_repetitions? compiler_flags? injection? functions?
+test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL timeout? execution_repetitions? measure_overhead? measurement_repetitions? compiler_flags? injection? functions?
 
 timeout: TIMEOUT_K POSITIVE_INT NL
 execution_repetitions: EXECUTION_REPETITIONS_K POSITIVE_INT NL
+measure_overhead: MEASURE_OVERHEAD_K BOOLEAN NL
+measurement_repetitions: MEASUREMENT_REPETITIONS_K POSITIVE_INT NL
 compiler_flags: COMPILER_FLAGS_K "[" compiler_flag_list? "]" NL
 
 injection: INJECTION_K injection_mode NL
@@ -29,6 +31,8 @@ DATA_PROTECTION_K:	"data_protection:"
 CONTROL_FLOW_K:		"control_flow_protection:"
 TIMEOUT_K:			"timeout_ms:"
 EXECUTION_REPETITIONS_K: "execution_repetitions:"
+MEASURE_OVERHEAD_K: "measure_overhead:"
+MEASUREMENT_REPETITIONS_K: "measurement_repetitions:"
 COMPILER_FLAGS_K:	"compiler_flags:"
 INJECTION_K:		"injection:"
 FUNCTIONS_K:		"functions:"

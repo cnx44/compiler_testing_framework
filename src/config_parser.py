@@ -55,6 +55,8 @@ class RunnerTest:
     functions: list[TargetFunction] = field(default_factory=list)
     compiler_flags: list[str] = field(default_factory=list)
     execution_repetitions: int = 1
+    measure_overhead: bool = True
+    measurement_repetitions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,13 @@ class RunnerConfigTransformer(Transformer):
         repetitions = next(item for item in items if isinstance(item, int))
         return ("execution_repetitions", repetitions)
 
+    def measure_overhead(self, items):
+        return ("measure_overhead", items[1])
+
+    def measurement_repetitions(self, items):
+        repetitions = next(item for item in items if isinstance(item, int))
+        return ("measurement_repetitions", repetitions)
+
     def timeout(self, items):
         return ("timeout_ms", int(items[1]))
 
@@ -166,6 +175,8 @@ class RunnerConfigTransformer(Transformer):
               control_flow_protection=values[3],
               compiler_flags=optional.get("compiler_flags", []),
               execution_repetitions=optional.get("execution_repetitions", 1),
+              measure_overhead=optional.get("measure_overhead", True),
+              measurement_repetitions=optional.get("measurement_repetitions", None),
               functions=optional.get("functions", [TargetFunction(name="main")]),
               injection=optional.get("injection", RegisterInjection()),
               timeout_ms=optional.get("timeout_ms", DEFAULT_TIMEOUT_MS),
