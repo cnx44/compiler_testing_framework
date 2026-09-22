@@ -15,7 +15,9 @@ import time
 from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
 from src.constants import DEFAULT_TIMEOUT_MS
 from src.env import Environment
+from src.file_io import atomic_write_text
 from src.injector import BaseInjector
+from src.models import TerminationEvent
 
 
 class ProgramRunner(ABC):
@@ -76,7 +78,7 @@ class ProgramRunner(ABC):
         """Execute an already compiled binary and collect its observable state."""
         if self._build_dir is None or not Path(self.exe).is_file():
             raise RuntimeError("The program must be compiled before it can be executed.")
-        if measure_overhead and (not isinstance(measurement_repetitions, int) or measurement_repetitions < 1):
+        if measure_overhead and (type(measurement_repetitions) is not int or measurement_repetitions < 1):
             raise ValueError("measurement_repetitions must be a positive integer when measure_overhead is true.")
 
         args = args or []
@@ -275,8 +277,9 @@ class ProgramRunner(ABC):
         elif flavor == "lldb":
             script = base_dir / "snapshot_lldb.py"
             command = [
-                debugger, "--batch", "--no-lldbinit", self.exe, "--", *args,
-                "-o", f"command script import {script}"
+                debugger, "--batch", "--no-lldbinit",
+                "-o", f"command script import {shlex.quote(str(script))}",
+                "--", self.exe, *args,
             ]
             
         return subprocess.run(
@@ -506,7 +509,7 @@ class CampaignRun:
 
         self.log = []
         self.results = []
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.summary_path = self.log_path.with_name(
             f"campaign_summary_{timestamp}.json"
         )
@@ -518,17 +521,22 @@ class CampaignRun:
 
         oracle_runners_cache = {}
         aspis_runners_cache = {}
+        owned_runners = []
         try:
             for run_index, run in enumerate(self.campaign.runs, start=1):
                 report("Preparing test")
                 self.log.append(f"RUN NAME: {run.name}")
                 entry_source = self._entry_source(run.programs)
                 if entry_source is None:
-                    self.log.append("No C or C++ source file found.")
+                    self.log.append(f"ERROR: CONFIGURATION [{run.name}]: No C or C++ source file found.")
                     self.log.append("")
                     continue
 
-                run_args = args if args is not None else self._args_from_values_file(entry_source)
+                try:
+                    run_args = args if args is not None else self._args_from_values_file(entry_source)
+                except (OSError, UnicodeError) as error:
+                    self.log.append(f"ERROR: CONFIGURATION [{run.name}]: Unable to read arguments: {error}")
+                    continue
                 self.log.append(f"Sources: {', '.join(run.programs)}")
                 self.log.append(
                     "Compiler flags: "
@@ -550,6 +558,10 @@ class CampaignRun:
                         var.name for tf in run.functions for var in tf.variables
                     ]
                     functions_to_check = [tf.name for tf in run.functions]
+                    measurement_repetitions = (
+                        (run.measurement_repetitions if run.measurement_repetitions is not None
+                         else run.execution_repetitions) if run.measure_overhead else 1
+                    )
 
                     # Define caching keys
                     oracle_cache_key = (
@@ -559,7 +571,8 @@ class CampaignRun:
                         tuple(vars_to_check),
                         tuple(functions_to_check),
                         run.measure_overhead,
-                        run.measurement_repetitions,
+                        measurement_repetitions,
+                        run.timeout_ms,
                     )
                     aspis_cache_key = oracle_cache_key + (
                         run.data_protection.name,
@@ -574,13 +587,14 @@ class CampaignRun:
                         oracle_runner = OracleRunner(
                             self.environment, self.debugger, timeout_ms=run.timeout_ms
                         )
+                        owned_runners.append(oracle_runner)
                         report("Compiling Oracle")
                         oracle_runner.compile(run.programs, run.compiler_flags)
                         report(f"Oracle execution (measurements) and debugger snapshot")
                         oracle_results = oracle_runner.execute(
                             run_args,
                             vars_to_check,
-                            run.measurement_repetitions if run.measurement_repetitions is not None else run.execution_repetitions,
+                            measurement_repetitions,
                             functions_to_check,
                             measure_overhead=run.measure_overhead,
                         )
@@ -598,13 +612,14 @@ class CampaignRun:
                             debugger=self.debugger,
                             timeout_ms=run.timeout_ms,
                         )
+                        owned_runners.append(aspis_runner)
                         report("Compiling ASPIS")
                         aspis_runner.compile(run.programs, run.compiler_flags)
                         report(f"ASPIS execution (measurements) and debugger snapshot")
                         aspis_results = aspis_runner.execute(
                             run_args,
                             vars_to_check,
-                            run.measurement_repetitions if run.measurement_repetitions is not None else run.execution_repetitions,
+                            measurement_repetitions,
                             functions_to_check,
                             measure_overhead=run.measure_overhead,
                         )
@@ -617,6 +632,12 @@ class CampaignRun:
                     def _run_inj(inj):
                         start_count = len(injections)
                         failures = []
+                        def record(result):
+                            if result.event == TerminationEvent.INTERNAL_ERROR:
+                                detail = (result.state.error or result.state.stderr
+                                          or result.state.debugger_output[-500:])
+                                raise RuntimeError(f"Debugger failed during injection: {detail}")
+                            injections.append((result, target_function))
                         def injection_progress(label):
                             report(f"{label}: {target_function.name} · "
                                    f"{len(injections) - start_count}/{run.execution_repetitions} injections "
@@ -630,7 +651,7 @@ class CampaignRun:
                             for future in concurrent.futures.as_completed(futures):
                                 try:
                                     result = future.result()
-                                    injections.append(result)
+                                    record(result)
                                     self.log.append(f"Injection result: {result}")
                                 except Exception as e:
                                     failures.append(e)
@@ -648,7 +669,7 @@ class CampaignRun:
                             injection_progress("Retrying injection")
                             try:
                                 result = inj.run(run_args)
-                                injections.append(result)
+                                record(result)
                                 self.log.append(f"Injection retry result: {result}")
                             except Exception as error:
                                 failures.append(error)
@@ -681,7 +702,6 @@ class CampaignRun:
 
                     report("Classifying results")
                     # Classify injection results
-                    from src.models import TerminationEvent
                     injection_summary = {
                         "total": len(injections),
                         "masked": 0,
@@ -695,12 +715,14 @@ class CampaignRun:
                         "latent_states": []
                     }
                 
-                    oracle_vars = oracle_results.get("variables", {})
-                    for inj_result in injections:
+                    for inj_result, injected_function in injections:
+                        oracle_vars = oracle_results.get("snapshots", {}).get(
+                            injected_function.name, oracle_results
+                        ).get("variables", {})
                         event = inj_result.event
                         if event == TerminationEvent.TIMEOUT:
                             injection_summary["timeout"] += 1
-                        elif event == TerminationEvent.CRASHED or event == TerminationEvent.INTERNAL_ERROR:
+                        elif event == TerminationEvent.CRASHED:
                             injection_summary["crash"] += 1
                         elif event == TerminationEvent.ASPIS_DATA:
                             injection_summary["aspis_data"] += 1
@@ -717,7 +739,8 @@ class CampaignRun:
                             elif state.stderr != oracle_results.get("stderr", ""):
                                 output_differs = True
                             
-                            for var_name in vars_to_check:
+                            for variable in injected_function.variables:
+                                var_name = variable.name
                                 if state.variables.get(var_name) != oracle_vars.get(var_name):
                                     state_differs = True
                                     break
@@ -726,11 +749,11 @@ class CampaignRun:
                                 injection_summary["sdc"] += 1
                                 # Save state as dict
                                 from dataclasses import asdict
-                                injection_summary["sdc_states"].append(asdict(state))
+                                injection_summary["sdc_states"].append({**asdict(state), "function": injected_function.name})
                             elif state_differs:
                                 injection_summary["latent"] += 1
                                 from dataclasses import asdict
-                                injection_summary["latent_states"].append(asdict(state))
+                                injection_summary["latent_states"].append({**asdict(state), "function": injected_function.name})
                             else:
                                 injection_summary["masked"] += 1
 
@@ -747,8 +770,7 @@ class CampaignRun:
 
                     report("Saving analysis")
                     # Save results to JSON
-                    with open(self.summary_path, "w", encoding="utf-8") as f:
-                        json.dump(self.results, f, indent=2)
+                    atomic_write_text(self.summary_path, json.dumps(self.results, indent=2))
 
                     self.log.extend(
                         self._comparison_lines(oracle_results, aspis_results, vars_to_check, run.measure_overhead)
@@ -759,12 +781,9 @@ class CampaignRun:
                     self.log.append(f"ERROR: {error}")
                 self.log.append("")
         finally:
-            for runner in oracle_runners_cache.values():
+            for runner in owned_runners:
                 runner.cleanup()
-            for runner in aspis_runners_cache.values():
-                runner.cleanup()
-
-        self.log_path.write_text("\n".join(self.log), encoding="utf-8")
+            self.log_path.write_text("\n".join(self.log), encoding="utf-8")
         return self.log
 
     def _entry_source(self, programs: list[str]):

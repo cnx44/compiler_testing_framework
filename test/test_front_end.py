@@ -157,6 +157,7 @@ class FrontEndSupportTest(unittest.TestCase):
     def test_home_accepts_j_for_downward_navigation(self):
         tui = AspisTui(Environment())
         tui.screen = MagicMock()
+        tui.screen.getmaxyx.return_value = (24, 80)
         with (
             patch.object(tui, "_frame"),
             patch.object(tui, "_write"),
@@ -176,6 +177,7 @@ class FrontEndSupportTest(unittest.TestCase):
     def test_plain_q_does_not_exit_from_home(self):
         tui = AspisTui(Environment())
         tui.screen = MagicMock()
+        tui.screen.getmaxyx.return_value = (24, 80)
         with (
             patch.object(tui, "_frame") as frame,
             patch.object(tui, "_write"),

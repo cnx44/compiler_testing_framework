@@ -1,6 +1,7 @@
 # gdb_utils.py
 import gdb
 import os
+import re
 
 
 def get_end_line(entry_func="main"):
@@ -38,6 +39,25 @@ def continue_to_function_return(entry_func="main"):
     return_line = get_end_line(entry_func)
     if return_line == -1:
         raise RuntimeError(f"Could not determine return line for '{entry_func}'.")
+    frame = gdb.selected_frame()
+    if frame.find_sal().line == return_line:
+        # A source breakpoint on the line we already occupy can run past the
+        # entire function (notably a one-line main). Stop before its return.
+        block = gdb.block_for_pc(int(gdb.parse_and_eval(f"&{entry_func}")))
+        instructions = frame.architecture().disassemble(block.start, block.end)
+        returns = [instruction["addr"] for instruction in instructions
+                   if re.match(r"^(?:ret\w*\b|bx\s+lr\b)", instruction["asm"].strip())]
+        if frame.pc() in returns:
+            return
+        if not returns:
+            raise RuntimeError(f"Could not locate a return instruction for '{entry_func}'.")
+        breakpoints = [gdb.Breakpoint(f"*{address:#x}") for address in returns]
+        try:
+            gdb.execute("continue")
+        finally:
+            for breakpoint in breakpoints:
+                breakpoint.delete()
+        return
     breakpoint = gdb.Breakpoint(str(return_line))
     try:
         gdb.execute("continue")

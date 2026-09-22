@@ -138,11 +138,14 @@ functions: []
 programs: [main.c]
 data_protection: none
 control_flow_protection: none
-injection: global target_global: counter
+injection: global
+functions: [main(@counter)]
 """
         )
 
-        self.assertEqual(campaign.runs[0].injection, GlobalInjection("counter"))
+        self.assertEqual(campaign.runs[0].injection, GlobalInjection())
+        self.assertTrue(campaign.runs[0].functions[0].variables[0].is_global)
+        self.assertEqual(campaign.runs[0].functions[0].variables[0].name, "counter")
 
     def test_resolves_program_paths_relative_to_configuration_file(self):
         with tempfile.TemporaryDirectory() as directory:

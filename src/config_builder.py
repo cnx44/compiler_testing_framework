@@ -22,6 +22,8 @@ from src.config_parser import (
 
 def campaign_to_text(campaign: Campaign) -> str:
     """Return the canonical configuration language representation of a campaign."""
+    if not campaign.runs:
+        raise ValueError("A configuration must contain at least one test.")
     return "\n".join(_test_to_lines(run) for run in campaign.runs) + "\n"
 
 
@@ -36,6 +38,10 @@ def _test_to_lines(run: RunnerTest) -> str:
         lines.append(f"timeout_ms: {run.timeout_ms}")
     if run.execution_repetitions != 1:
         lines.append(f"execution_repetitions: {run.execution_repetitions}")
+    if not run.measure_overhead:
+        lines.append("measure_overhead: false")
+    if run.measurement_repetitions is not None:
+        lines.append(f"measurement_repetitions: {run.measurement_repetitions}")
     if run.compiler_flags:
         lines.append(f"compiler_flags: [{', '.join(run.compiler_flags)}]")
     lines.append(f"injection: {_injection(run.injection)}")
@@ -58,7 +64,7 @@ def _injection(injection: RegisterInjection | MemoryInjection | GlobalInjection)
     if isinstance(injection, MemoryInjection):
         return "memory"
     if isinstance(injection, GlobalInjection):
-        return f"global target_global: {injection.target_global}" if injection.target_global else "global"
+        return "global"
     raise TypeError(f"Unsupported injection: {type(injection)!r}")
 
 
@@ -66,7 +72,8 @@ def _function(function) -> str:
     if not function.variables:
         return function.name
     variables = ", ".join(
-        variable.name if variable.length is None else f"{variable.name}:{variable.length}"
+        ("@" if variable.is_global else "") + variable.name
+        + ("" if variable.length is None else f":{variable.length}")
         for variable in function.variables
     )
     return f"{function.name}({variables})"

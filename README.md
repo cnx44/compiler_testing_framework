@@ -376,6 +376,8 @@ data_protection: eddi | seddi | fdsc | none
 control_flow_protection: cfcss | rasm | inter-rasm | none
 [timeout_ms: <intero positivo>]
 [execution_repetitions: <intero positivo>]
+[measure_overhead: true|false]
+[measurement_repetitions: <intero positivo>]
 [compiler_flags: [<flag>, ...]]
 [injection: register [data_only: true|false] | memory | global]
 [functions: [<funzione>([@]<variabile>[:<lunghezza>], ...)], ...]]
@@ -390,7 +392,9 @@ control_flow_protection: cfcss | rasm | inter-rasm | none
 | `data_protection` | sì | — | `eddi`, `seddi`, `fdsc` o `none`. |
 | `control_flow_protection` | sì | — | `cfcss`, `rasm`, `inter-rasm` o `none`. |
 | `timeout_ms` | no | `5000` | Limite positivo applicato a ogni processo di esecuzione/debug. |
-| `execution_repetitions` | no | `1` | Ripetizioni per timing e, per ciascun injector, numero di injection. |
+| `execution_repetitions` | no | `1` | Numero di injection per ciascun injector; default anche per il timing. |
+| `measure_overhead` | no | `true` | Abilita le misurazioni e il confronto dell'overhead. |
+| `measurement_repetitions` | no | `execution_repetitions` | Numero di campioni temporizzati, indipendente dalle injection. |
 | `compiler_flags` | no | `[]` | Flag separati da virgole, passati a entrambi i compilatori. |
 | `injection` | no | `register data_only: false` | Strategia di fault injection. |
 | `functions` | no | `[main]` | Funzioni sulle quali acquisire stato e iniettare fault. |
@@ -696,22 +700,25 @@ Nel riepilogo:
 
 - `←` / `→` cambia test;
 - `s` apre gli stati classificati come SDC;
-- `l` apre gli stati Latent;
+- `t` apre gli stati Latent (`h`/`l` cambia test);
 - `g` apre il log completo della campagna corrente;
 - `Esc` torna alla home.
 
 ### Create configuration
 
-Questa voce crea un singolo test. Nel file picker, `Space` seleziona più unità
-di compilazione e `Enter` conferma: tutti i file selezionati vengono compilati
-assieme nello stesso eseguibile.
+**Select files** crea test indipendenti per i sorgenti selezionati;
+**Link files together** li compila nello stesso eseguibile. Nel file picker,
+`Space` seleziona più file e `Enter` conferma.
 
 Il form espone direttamente i campi della grammatica. **Validate and save**
 controlla nome, file, interi positivi e sintassi completa prima di chiedere la
 directory e il nome del `.cfg`. In caso d'errore si ritorna allo stesso form con
 i valori inseriti ancora presenti.
+Il salvataggio su un file esistente richiede conferma. Nei campi di testo il
+valore attuale è modificabile: `Enter` lo conserva, `Ctrl-U` lo svuota,
+`Esc` annulla subito e `:q` esce dall'applicazione.
 
-### Create batch configuration
+### Create configuration → Batch directory
 
 Il batch seleziona una directory e crea un test indipendente per ogni sorgente
 direttamente contenuto al suo interno. La scansione non è ricorsiva. Ogni test
@@ -722,12 +729,13 @@ test generati si chiamano `experiment-alpha` e `experiment-beta`.
 
 Il batch è adatto a programmi autonomi composti da un solo file. Non è adatto a
 un progetto nel quale `main.c` deve essere collegato con `helpers.c`: in quel
-caso usare **Create configuration** e selezionare entrambi i file.
+caso usare **Create configuration → Link files together** e selezionare entrambi i file.
 
 ### Edit configuration
 
 Carica un `.cfg` esistente. Se contiene più test, chiede quale modificare. Dalla lista dei test è anche possibile eliminare permanentemente un test selezionando la voce apposita (Delete test) nel form di modifica. Il
 test aggiornato viene nuovamente validato e serializzato insieme agli altri.
+La cancellazione richiede conferma e non è consentita per l'ultimo test.
 I percorsi assoluti rendono la posizione del file di configurazione indipendente
 dalla posizione dei sorgenti. Se modifichi i parametri per molteplici file sorgente in un solo colpo (es. da batch), la TUI ti darà la possibilità di applicare una singola configurazione della funzione (es. `main`) a tutti i file contemporaneamente.
 
@@ -829,7 +837,7 @@ Per ogni variante vengono registrati:
 - `execution_time_samples_seconds`: tutti i campioni;
 - `execution_time_stddev_seconds`: deviazione standard campionaria;
 - `execution_time_standard_error_seconds`: errore standard della media;
-- `execution_repetitions`: numero di esecuzioni misurate;
+- `measurement_repetitions`: numero di esecuzioni per la variante;
 - `binary_size_bytes`: dimensione esatta dell'eseguibile su disco;
 - `variables`, `registers` e `snapshots`: stato acquisito dal debugger.
 
@@ -843,6 +851,10 @@ percent  = (ASPIS - Oracle) / Oracle × 100
 Una percentuale positiva indica overhead ASPIS; una negativa indica un valore
 ASPIS inferiore. Se il valore Oracle è zero, la percentuale è `null` nel JSON e
 `n/a` nella TUI.
+
+Con `measure_overhead: false` ciascuna variante viene eseguita una sola volta
+per acquisire output e stato. Il confronto `difference` è vuoto e la TUI mostra
+`n/a`; le injection mantengono il proprio numero di ripetizioni.
 
 Il tempo misura soltanto l'esecuzione nativa del programma: non include
 compilazione, startup del debugger, profiling o injection. Oracle e ASPIS sono
@@ -901,7 +913,7 @@ osservato.
       "execution_time_samples_seconds": [0.0011, 0.0013],
       "execution_time_stddev_seconds": 0.00014,
       "execution_time_standard_error_seconds": 0.0001,
-      "execution_repetitions": 2,
+      "measurement_repetitions": 2,
       "binary_size_bytes": 18432,
       "variables": {"result": "42"},
       "registers": {"rax": "0x2a"},

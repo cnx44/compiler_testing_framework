@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import curses
 import json
+import math
 import os
 import re
 import shlex
@@ -37,6 +38,7 @@ from src.config_parser import (
     parse_runner_config,
 )
 from src.env import Environment
+from src.file_io import atomic_write_text
 from src.source_symbols import analyze_source, SourceAnalysisError
 
 
@@ -119,13 +121,19 @@ class AspisTui:
         ]
         while True:
             self._frame("ASPIS · Campaign console", "↑↓/jk select · Enter confirm")
-            self._write(3, 3, "Active toolchain", curses.A_BOLD)
-            self._write(4, 3, _aspis_command_preview(self.environment), curses.color_pair(2))
-            self._write(6, 3, "Choose an action", curses.A_BOLD)
-            for index, label in enumerate(choices):
+            roomy = self._height() >= 24
+            if roomy:
+                self._write(3, 3, "Active toolchain", curses.A_BOLD)
+                self._write(4, 3, _aspis_command_preview(self.environment), curses.color_pair(2))
+            self._write(6 if roomy else 2, 3, "Choose an action", curses.A_BOLD)
+            first_row, step = (8, 2) if roomy else (3, 1)
+            visible = max(1, (self._height() - 4 - first_row) // step + 1)
+            offset = max(0, choice - visible + 1)
+            for index in range(offset, min(len(choices), offset + visible)):
+                label = choices[index]
                 marker = "›" if index == choice else " "
                 attr = self._selected_attr() if index == choice else 0
-                self._write(8 + index * 2, 5, f"{marker} {label}", attr)
+                self._write(first_row + (index - offset) * step, 5, f"{marker} {label}", attr)
             key = self._key()
             if key in (curses.KEY_ENTER, 10, 13) and choice == 5:
                 return
@@ -168,28 +176,21 @@ class AspisTui:
                 "↑↓/jk select · Enter edit/save · Esc cancel",
             )
             self._write(2, 3, "Project settings", curses.A_BOLD)
-            for index, (key, label) in enumerate(fields):
-                row = 4 + index * 2
+            visible = max(1, (self._height() - 7) // 2)
+            offset = max(0, selected - visible + 1)
+            for index in range(offset, min(len(fields) + 1, offset + visible)):
+                row = 4 + (index - offset) * 2
                 attr = self._selected_attr() if selected == index else 0
                 marker = "›" if selected == index else " "
-                value = values[key] or "(not configured)"
-                self._write(row, 3, f"{marker} {label}", attr)
-                self._write(row + 1, 6, value, curses.color_pair(2))
-            save_row = 4 + len(fields) * 2
-            save_attr = self._selected_attr() if selected == len(fields) else curses.A_BOLD
-            self._write(
-                save_row,
-                3,
-                f"{'›' if selected == len(fields) else ' '} Save settings",
-                save_attr,
-            )
-            self._write(save_row + 2, 3, "Effective command", curses.A_BOLD)
-            self._write(
-                save_row + 3,
-                3,
-                _aspis_command_preview(candidate),
-                curses.color_pair(2),
-            )
+                if index == len(fields):
+                    self._write(row, 3, f"{marker} Save settings", attr or curses.A_BOLD)
+                else:
+                    key, label = fields[index]
+                    self._write(row, 3, f"{marker} {label}", attr)
+                    self._write(row + 1, 6, values[key] or "(not configured)", curses.color_pair(2))
+            if self._height() >= 23:
+                self._write(16, 3, "Effective command", curses.A_BOLD)
+                self._write(17, 3, _aspis_command_preview(candidate), curses.color_pair(2))
             key_code = self._key()
             if key_code == 27:
                 return
@@ -222,7 +223,11 @@ class AspisTui:
                     )
                     continue
                 settings_path = self.start_dir / TOOLCHAIN_CONFIG
-                _save_toolchain(settings_path, candidate)
+                try:
+                    _save_toolchain(settings_path, candidate)
+                except OSError as error:
+                    self._message("Unable to save settings", str(error), error=True)
+                    continue
                 self.environment = candidate
                 self._message(
                     "Toolchain settings saved",
@@ -256,6 +261,7 @@ class AspisTui:
         self._frame(
             "ASPIS · Running campaign",
             "Please wait: compilation, analysis, and fault injection may take time",
+            exit_hint=False,
         )
         self._write(3, 3, f"Running {config.name}…", curses.A_BOLD)
         self.screen.refresh()
@@ -295,7 +301,7 @@ class AspisTui:
                 now = time.monotonic()
                 elapsed = int(now - started)
                 spinner = "|/-\\"[int((now - started) * 4) % 4]
-                self._frame("ASPIS · Running campaign", "Campaign running · results appear when finished")
+                self._frame("ASPIS · Running campaign", "Campaign running · results appear when finished", exit_hint=False)
                 lines = [
                     f"{spinner} {config.name}",
                     f"Test {state['index']}/{state['total']}: {state['test']}",
@@ -344,6 +350,7 @@ class AspisTui:
             return
         try:
             results = json.loads(result_file.read_text(encoding="utf-8"))
+            _validate_results(results)
         except Exception as error:
             self._message("Error", f"Unable to read the file: {error}", error=True)
             return
@@ -356,6 +363,7 @@ class AspisTui:
             self._message("No results", "This campaign contains no results.")
             return
         selected = 0
+        offset = 0
         while True:
             result = results[selected]
             injections = result.get("injections", {})
@@ -401,12 +409,15 @@ class AspisTui:
                     1,
                     f"WARNING: {error_count} test(s) failed · press g to view the log",
                 )
-            footer = "←→/hl test · s SDC · t Latent"
+            footer = "↑↓/jk scroll · ←→/hl test · s SDC · t Latent"
             if log is not None:
                 footer += " · g log"
             footer += " · Esc go back"
             self._frame("ASPIS · Campaign summary", footer)
-            for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
+            wrapped = _wrapped_lines(lines, self._width() - 6)
+            height = max(1, self._height() - 6)
+            offset = min(offset, max(0, len(wrapped) - height))
+            for row, line in enumerate(wrapped[offset:offset + height], start=3):
                 self._write(row, 3, line)
             
             key = self._key()
@@ -414,8 +425,14 @@ class AspisTui:
                 return
             if key in (curses.KEY_LEFT, ord("h")):
                 selected = (selected - 1) % len(results)
+                offset = 0
             elif key in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(results)
+                offset = 0
+            elif key in (curses.KEY_UP, ord("k")):
+                offset = max(0, offset - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                offset += 1
             elif key in (ord("s"), ord("S")):
                 self._sdc_inspector(name, result, state_key="sdc_states", title_prefix="SDC")
             elif key in (ord("t"), ord("T")):
@@ -438,6 +455,7 @@ class AspisTui:
 
         oracle = result.get("oracle", {})
         selected = 0
+        offset = 0
         while True:
             state = sdc_states[selected]
             lines = [
@@ -465,7 +483,9 @@ class AspisTui:
                 ])
                 
             # VARIABLES
-            oracle_vars = oracle.get("variables", {})
+            oracle_vars = oracle.get("snapshots", {}).get(
+                state.get("function"), oracle
+            ).get("variables", {})
             aspis_vars = state.get("variables", {})
             all_vars = sorted(set(oracle_vars) | set(aspis_vars))
             var_lines = []
@@ -477,9 +497,12 @@ class AspisTui:
                 lines.extend(var_lines)
                 lines.append("")
 
-            footer = f"←→/hl browse {title_prefix} · Esc return to summary"
-            self._frame("ASPIS · SDC Inspector", footer)
-            for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
+            footer = f"↑↓/jk scroll · ←→/hl browse {title_prefix} · Esc return"
+            self._frame(f"ASPIS · {title_prefix} Inspector", footer)
+            wrapped = _wrapped_lines(lines, self._width() - 6)
+            height = max(1, self._height() - 6)
+            offset = min(offset, max(0, len(wrapped) - height))
+            for row, line in enumerate(wrapped[offset:offset + height], start=3):
                 if line.startswith("- "):
                     self._write(row, 3, line, curses.color_pair(3))
                 elif line.startswith("+ "):
@@ -492,8 +515,14 @@ class AspisTui:
                 return
             if key in (curses.KEY_LEFT, ord("h")):
                 selected = (selected - 1) % len(sdc_states)
+                offset = 0
             elif key in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(sdc_states)
+                offset = 0
+            elif key in (curses.KEY_UP, ord("k")):
+                offset = max(0, offset - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                offset += 1
 
     def _create_configuration(self) -> None:
         draft = ConfigurationDraft()
@@ -521,7 +550,16 @@ class AspisTui:
             filename += ".cfg"
         target = destination / filename
         try:
-            target.write_text(_draft_text(draft), encoding="utf-8")
+            text = _draft_text(draft)
+            _validate_config_text(text)
+            try:
+                with target.open("x", encoding="utf-8") as handle:
+                    handle.write(text)
+            except FileExistsError:
+                if self._choose(f"Replace existing configuration {target.name}?",
+                                ("Cancel", "Replace")) != "Replace":
+                    return
+                atomic_write_text(target, text)
         except OSError as error:
             self._message("Unable to save", str(error), error=True)
             return
@@ -562,6 +600,13 @@ class AspisTui:
             return
         try:
             if draft == "DELETE":
+                if len(campaign.runs) == 1:
+                    self._message("Cannot delete last test",
+                                  "A configuration must contain at least one test.")
+                    return
+                if self._choose(f"Delete test {campaign.runs[index].name}?",
+                                ("Cancel", "Delete")) != "Delete":
+                    return
                 runs = [
                     *campaign.runs[:index],
                     *campaign.runs[index + 1 :],
@@ -574,9 +619,11 @@ class AspisTui:
                     *edited_runs,
                     *campaign.runs[index + 1 :],
                 ]
-            config.write_text(
-                campaign_to_text(Campaign(runs=runs)), encoding="utf-8"
-            )
+            text = campaign_to_text(Campaign(runs=runs))
+            _validate_config_text(text)
+            atomic_write_text(config, text)
+        except _QuitTui:
+            raise
         except Exception as error:
             self._message("Unable to save", str(error), error=True)
             return
@@ -611,37 +658,23 @@ class AspisTui:
                 title,
                 "↑↓/jk field · Enter edit/save · Esc go back",
             )
-            for index, (key, label) in enumerate(fields):
-                value = _draft_field_value(draft, key)
-                marker = "›" if selected == index else " "
-                attr = self._selected_attr() if selected == index else 0
-                self._write(2 + index * 2, 3, f"{marker} {label}", attr)
-                self._write(
-                    3 + index * 2,
-                    6,
-                    value or "(empty)",
-                    curses.color_pair(2),
-                )
             save_index = len(fields)
             delete_index = save_index + 1 if allow_delete else -1
             max_index = save_index + (1 if allow_delete else 0)
 
-            save_row = 2 + save_index * 2
-            self._write(
-                save_row,
-                3,
-                f"{'›' if selected == save_index else ' '} Validate and save",
-                self._selected_attr() if selected == save_index else curses.A_BOLD,
-            )
-            
-            if allow_delete:
-                delete_row = 2 + delete_index * 2
-                self._write(
-                    delete_row,
-                    3,
-                    f"{'›' if selected == delete_index else ' '} Delete test",
-                    self._selected_attr() if selected == delete_index else curses.color_pair(3),
-                )
+            visible = max(1, (self._height() - 5) // 2)
+            offset = max(0, selected - visible + 1)
+            for index in range(offset, min(max_index + 1, offset + visible)):
+                row = 2 + (index - offset) * 2
+                marker = "›" if selected == index else " "
+                attr = self._selected_attr() if selected == index else 0
+                if index < len(fields):
+                    key, label = fields[index]
+                    self._write(row, 3, f"{marker} {label}", attr)
+                    self._write(row + 1, 6, _draft_field_value(draft, key) or "(empty)", curses.color_pair(2))
+                else:
+                    label = "Validate and save" if index == save_index else "Delete test"
+                    self._write(row, 3, f"{marker} {label}", attr or curses.A_BOLD)
 
             key_code = self._key()
             if key_code == 27:
@@ -988,34 +1021,59 @@ class AspisTui:
     def _ask_text(
         self, title: str, default: str, allow_empty: bool = False
     ) -> str | None:
-        self._frame("ASPIS · Configuration", "Enter confirm · Esc cancel")
-        self._write(3, 3, title, curses.A_BOLD)
-        if default:
-            self._write(4, 3, f"Default: {default}", curses.color_pair(2))
-        self._write(5, 3, "> ")
-        self.screen.move(5, 5)
+        value = list(default)
+        cursor = len(value)
         curses.curs_set(1)
-        curses.echo()
+        curses.noecho()
         try:
-            raw = self.screen.getstr(5, 5, max(1, self._width() - 7))
-            if raw == b"\x1b":
-                return None
-            value = raw.decode("utf-8").strip()
-        except curses.error:
-            value = ""
+            while True:
+                self._frame("ASPIS · Configuration", "Enter save · Esc cancel · Ctrl-U clear")
+                self._write(3, 3, title, curses.A_BOLD)
+                self._write(4, 3, "Empty value allowed" if allow_empty else "Value required")
+                width = max(1, self._width() - 7)
+                offset = max(0, cursor - width + 1)
+                self._write(5, 3, "> " + "".join(value[offset:offset + width]))
+                self.screen.move(5, 5 + cursor - offset)
+                key = self.screen.get_wch()
+                if key == "\x1b":
+                    return None
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    text = "".join(value).strip()
+                    if text or allow_empty:
+                        return text
+                elif key == "q" and cursor and value[cursor - 1] == ":":
+                    raise _QuitTui
+                elif key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    if cursor:
+                        cursor -= 1
+                        value.pop(cursor)
+                elif key == curses.KEY_DC:
+                    if cursor < len(value):
+                        value.pop(cursor)
+                elif key == "\x15":
+                    value, cursor = [], 0
+                elif key in (curses.KEY_HOME, "\x01"):
+                    cursor = 0
+                elif key in (curses.KEY_END, "\x05"):
+                    cursor = len(value)
+                elif key == curses.KEY_LEFT:
+                    cursor = max(0, cursor - 1)
+                elif key == curses.KEY_RIGHT:
+                    cursor = min(len(value), cursor + 1)
+                elif isinstance(key, str) and key.isprintable():
+                    value.insert(cursor, key)
+                    cursor += 1
         finally:
-            curses.noecho()
             curses.curs_set(0)
-        if value or allow_empty:
-            return value
-        return default
 
     def _paged_text(self, title: str, lines: list[str], footer: str) -> None:
         offset = 0
         while True:
             self._frame(title, footer)
-            height = self._height() - 5
-            visible = _fit_lines(lines[offset:], self._width() - 6, height)
+            height = max(1, self._height() - 6)
+            wrapped = _wrapped_lines(lines, self._width() - 6)
+            offset = min(offset, max(0, len(wrapped) - height))
+            visible = wrapped[offset:offset + height]
             for row, line in enumerate(visible, start=3):
                 self._write(row, 3, line)
             key = self._key()
@@ -1024,9 +1082,12 @@ class AspisTui:
             if key in (curses.KEY_UP, ord("k")):
                 offset = max(0, offset - 1)
             elif key in (curses.KEY_DOWN, ord("j")):
-                offset = min(max(0, len(lines) - 1), offset + 1)
+                offset = min(max(0, len(wrapped) - height), offset + 1)
 
     def _message(self, title: str, text: str, error: bool = False) -> None:
+        if len(_wrapped_lines(text.splitlines(), self._width() - 6)) > max(1, self._height() - 6):
+            self._paged_text(f"ASPIS · {title}", text.splitlines(), "↑↓/jk scroll · Esc go back")
+            return
         self._frame(f"ASPIS · {title}", "Enter or Esc go back")
         attr = curses.color_pair(3) if error else 0
         for row, line in enumerate(_fit_lines(text.splitlines(), self._width() - 6, self._height() - 5), start=3):
@@ -1034,8 +1095,14 @@ class AspisTui:
         while self._key() not in (27, 10, 13, curses.KEY_ENTER):
             pass
 
-    def _frame(self, title: str, footer: str) -> None:
-        footer = f"{footer} · :q exit app"
+    def _frame(self, title: str, footer: str, exit_hint: bool = True) -> None:
+        if exit_hint:
+            while self._height() < 9 or self._width() < 30:
+                self.screen.erase()
+                self._write(0, 0, "Resize to 30x9; :q exits")
+                self.screen.refresh()
+                self._key()
+            footer = f"{footer} · :q exit app"
         self.screen.erase()
         self._write(0, 2, title, curses.A_BOLD)
         self._write(self._height() - 2, 2, footer, curses.color_pair(2))
@@ -1068,6 +1135,51 @@ class AspisTui:
         return curses.color_pair(1) | curses.A_BOLD
 
 
+def _validate_results(results) -> None:
+    """Validate the fields consumed by summaries and state inspectors."""
+    def mapping(value, label):
+        if not isinstance(value, dict):
+            raise ValueError(f"{label} must be an object.")
+        return value
+
+    def number(value, label, count=False):
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or (count and (type(value) is not int or value < 0))):
+            raise ValueError(f"Invalid number for {label}.")
+
+    def state(value, label):
+        mapping(value, label)
+        mapping(value.get("variables", {}), f"{label}.variables")
+        if "function" in value and not isinstance(value["function"], str):
+            raise ValueError(f"{label}.function must be a string.")
+
+    if not isinstance(results, list):
+        raise ValueError("Campaign results must be a list of tests.")
+    for index, result in enumerate(results, 1):
+        label = f"Test {index}"
+        mapping(result, label)
+        if not isinstance(result.get("name"), str) or not result["name"]:
+            raise ValueError(f"{label} needs a name.")
+        injections = mapping(result.get("injections", {}), f"{label}.injections")
+        for key in ("total", "masked", "latent", "sdc", "timeout", "crash", "aspis_data", "aspis_cf"):
+            number(injections.get(key, 0), f"{label}.{key}", count=True)
+        for key in ("sdc_states", "latent_states"):
+            states = injections.get(key, [])
+            if not isinstance(states, list):
+                raise ValueError(f"{label}.{key} must be a list.")
+            for item in states:
+                state(item, f"{label}.{key}")
+        state(result.get("oracle", {}), f"{label}.oracle")
+        snapshots = mapping(result.get("oracle", {}).get("snapshots", {}), f"{label}.snapshots")
+        for snapshot in snapshots.values():
+            state(snapshot, f"{label}.snapshot")
+        difference = mapping(result.get("difference", {}), f"{label}.difference")
+        for key in ("binary_size_bytes", "execution_time_seconds"):
+            delta = mapping(difference.get(key, {}), f"{label}.{key}")
+            if delta.get("percent") is not None:
+                number(delta["percent"], f"{label}.{key}.percent")
+
+
 def _expanded_path(value: str) -> str:
     return str(Path(value).expanduser().resolve()) if value else ""
 
@@ -1095,9 +1207,9 @@ def _toolchain_payload(environment: Environment) -> dict:
 
 
 def _save_toolchain(path: Path, environment: Environment) -> None:
-    path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(_toolchain_payload(environment), indent=2) + "\n",
-        encoding="utf-8",
     )
 
 
@@ -1213,11 +1325,11 @@ def _configuration_text(
     control_mode,
     timeout,
     repetitions,
-    measure_overhead,
-    measurement_repetitions,
     flags,
     injection,
     functions,
+    measure_overhead=True,
+    measurement_repetitions="",
 ) -> str:
     lines = [
         f"name: {name}",
@@ -1278,11 +1390,11 @@ def _draft_text(draft: ConfigurationDraft) -> str:
                     control_mode,
                     draft.timeout,
                     draft.repetitions,
-                    draft.measure_overhead,
-                    draft.measurement_repetitions,
                     draft.compiler_flags,
                     injection,
                     file_functions,
+                    measure_overhead=draft.measure_overhead,
+                    measurement_repetitions=draft.measurement_repetitions,
                 ).rstrip()
             )
     return "\n".join(blocks) + "\n"
@@ -1367,6 +1479,13 @@ def _result_lines(result: dict) -> list[str]:
     names = sorted(set(oracle.get("variables", {})) | set(aspis.get("variables", {})))
     lines.extend(f"  {'OK' if oracle.get('variables', {}).get(name) == aspis.get('variables', {}).get(name) else 'DIFF':4} {name}: {oracle.get('variables', {}).get(name, '<missing>')} → {aspis.get('variables', {}).get(name, '<missing>')}" for name in names)
     return lines
+
+
+def _wrapped_lines(lines: Iterable[str], width: int) -> list[str]:
+    width = max(1, width)
+    return [line[index:index + width]
+            for line in lines
+            for index in range(0, max(1, len(line)), width)]
 
 
 def _fit_lines(lines: Iterable[str], width: int, height: int) -> list[str]:

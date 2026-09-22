@@ -1,6 +1,7 @@
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -97,6 +98,8 @@ class BaseInjector(ABC):
         self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
         self._setup_lock = threading.Lock()
         self._setup_cache: dict | None = None
+        self._setup_args: tuple[str, ...] | None = None
+        self._profile_args: list[str] = []
 
     @abstractmethod
     def setup(self) -> dict:
@@ -154,7 +157,7 @@ class BaseInjector(ABC):
             ]
         return [
             debugger, "--batch", "--no-lldbinit",
-            "-o", f"command script import {script}",
+            "-o", f"command script import {shlex.quote(str(script))}",
             "--", self.target_bin, *args,
         ]
 
@@ -189,7 +192,7 @@ class BaseInjector(ABC):
             )
             try:
                 result = subprocess.run(
-                    self._debugger_command(debugger, str(profile_script)),
+                    self._debugger_command(debugger, str(profile_script), self._profile_args),
                     capture_output=True,
                     text=True,
                     env=env,
@@ -225,11 +228,12 @@ class BaseInjector(ABC):
         args = args or []
         run_env = os.environ.copy()
         
-        if self._setup_cache is None:
-            with self._setup_lock:
-                if self._setup_cache is None:
-                    self._setup_cache = self.setup()
-        run_env.update(self._setup_cache)
+        with self._setup_lock:
+            if self._setup_cache is None or self._setup_args != tuple(args):
+                self._profile_args = list(args)
+                self._setup_cache = self.setup()
+                self._setup_args = tuple(args)
+            run_env.update(self._setup_cache)
         
         with tempfile.NamedTemporaryFile(delete=False) as temp_out:
             inferior_out = Path(temp_out.name)
@@ -300,7 +304,7 @@ class BaseInjector(ABC):
             or "stop reason = signal" in combined_out
         ):
             event = TerminationEvent.CRASHED
-        elif "[FATAL]" in combined_out or "Uncaught Exception" in combined_out:
+        elif exit_code != 0 or "[FATAL]" in combined_out or "Uncaught Exception" in combined_out:
             event = TerminationEvent.INTERNAL_ERROR
 
         # Extract the internal state

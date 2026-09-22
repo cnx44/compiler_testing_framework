@@ -7,8 +7,21 @@ from unittest.mock import patch, Mock
 from src.injector import MemoryInjector
 from src.models import ExecutionState
 from src.env import Environment
+from src.campaign_runner import OracleRunner
 
 class TestDynamicInference(unittest.TestCase):
+    def test_snapshot_of_one_line_main_keeps_registers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "main.c"
+            source.write_text("int main(void) { int x = 1; return x - 1; }\n")
+            runner = OracleRunner(Environment(), debugger="gdb")
+            try:
+                runner.compile([str(source)])
+                snapshot = runner._debug_snapshot([])
+                self.assertTrue(snapshot["registers"])
+            finally:
+                runner.cleanup()
+
     def test_dynamic_inference_static_array(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             src_file = Path(temp_dir) / "main.c"

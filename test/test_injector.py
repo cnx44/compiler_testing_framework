@@ -149,6 +149,7 @@ rax 0x4
     def test_run_classifies_all_non_timeout_events(self):
         cases = [
             ("normal", "", 0, TerminationEvent.RETURNED),
+            ("", "debugger failed", 1, TerminationEvent.INTERNAL_ERROR),
             ("Data corruption detected", "", 1, TerminationEvent.ASPIS_DATA),
             ("", "Control-flow signature mismatch", 1, TerminationEvent.ASPIS_CF),
             ("Program received signal SIGSEGV", "", 1, TerminationEvent.CRASHED),
@@ -171,6 +172,20 @@ rax 0x4
                     self.assertIs(result.event, expected)
                     command = injector._extract_state.call_args
                     self.assertEqual(command.args[0:2], (stdout, stderr))
+
+    @patch("src.injector.shutil.which", side_effect=lambda executable: executable)
+    @patch("src.injector.subprocess.run")
+    def test_profiling_receives_arguments_and_cache_changes_with_arguments(self, run_process, _which):
+        run_process.return_value = subprocess.CompletedProcess([], 0, "PROFILED_STEPS=2\nPROFILED_REGS=rax\n", "")
+        injector = RegisterInjector(Environment(), "/tmp/program", "/tmp/main.c", debugger="gdb")
+        injector._extract_state = Mock(return_value=ExecutionState())
+        injector.run(["first"])
+        injector.run(["first"])
+        injector.run(["second"])
+        profiles = [call for call in run_process.call_args_list if "profile_target.py" in str(call.args[0])]
+        self.assertEqual(len(profiles), 2)
+        self.assertEqual(profiles[0].args[0][-1], "first")
+        self.assertEqual(profiles[1].args[0][-1], "second")
 
     def test_run_classifies_timeout_and_decodes_partial_output(self):
         timeout = subprocess.TimeoutExpired(
@@ -275,11 +290,11 @@ class InjectorImplementationsTest(unittest.TestCase):
 
     def test_factory_creates_global_injector(self):
         injectors = BaseInjector.create_for_target(
-            GlobalInjection(target_global="counter"),
+            GlobalInjection(),
             Environment(),
             "program",
             "main.c",
-            TargetFunction("work"),
+            TargetFunction("work", [TargetVariable("counter", is_global=True)]),
         )
 
         self.assertEqual(len(injectors), 1)

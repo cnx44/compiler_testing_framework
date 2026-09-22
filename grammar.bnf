@@ -6,6 +6,8 @@
 			"control_flow_protection:"		<CONTROL_FLOW>		NL
 			["timeout_ms:"					<POSITIVE_INT>		NL]
 			["execution_repetitions:"		<POSITIVE_INT>		NL]
+			["measure_overhead:" ("true" | "false") NL]
+			["measurement_repetitions:" <POSITIVE_INT> NL]
 			["compiler_flags: ["			<COMPILER_FLAGS> "]"	NL]
 			["injection:"					<INJECTION_MODE>	NL]
 			["functions: ["					<FUNCTIONS> "]"		NL];
@@ -13,16 +15,18 @@
 <INJECTION_MODE> ::= <REGISTER_MODE> | <MEMORY_MODE> | <GLOBAL_MODE>;
 <REGISTER_MODE> ::= "register" ["data_only:" ("true" | "false")];
 <MEMORY_MODE> ::= "memory";
-<GLOBAL_MODE> ::= "global" ["target_global:" <WORD>];
+<GLOBAL_MODE> ::= "global";
 
 <FUNCTIONS> ::= <FUNCTION_DEF> ("," <FUNCTION_DEF>)*;
 <FUNCTION_DEF> ::= <WORD> ["(" <VAR_LIST> ")"];
 <VAR_LIST> ::= <VAR_DEF> ("," <VAR_DEF>)*;
-<VAR_DEF> ::= <WORD> [":" <POSITIVE_INT>];
+<VAR_DEF> ::= ["@"] <WORD> [":" <POSITIVE_INT>];
 
-<PROGRAM>	::= <WORD> "." <EXT>;
+<PROGRAM>	::= <PROGRAM_PATH> | <ESCAPED_STRING>;
+<PROGRAM_PATH> ::= unquoted path ending in ".c", ".cpp" or ".rs", excluding whitespace, commas, brackets and quotes;
+<ESCAPED_STRING> ::= a JSON double-quoted string;
 <EXT>		::= "c" | "cpp" | "rs";
-<PROGRAMS>  ::= <PROGRAM> ("," <PROGRAM>)+;
+<PROGRAMS>  ::= <PROGRAM> ("," <PROGRAM>)*;
 
 <DATA_PROTECTION>	::= "eddi" | "seddi" | "fdsc" | "none";
 <CONTROL_FLOW>	::= "cfcss" | "rasm" | "inter-rasm" | "none";
@@ -30,11 +34,12 @@
 <COMPILER_FLAGS> ::= <COMPILER_FLAG> ("," <COMPILER_FLAG>)*;
 <COMPILER_FLAG> ::= any non-whitespace sequence excluding ",", "[" and "]";
 
-<WORD>		::=	(<LETTER> | <NUMBER> | "_")*;
+<WORD>		::=	(<LETTER> | <NUMBER> | "_" | "-")+;
 <LETTER>	::=	  "A" | "B" | "C" | "D" | "E" | "F" | "G"
 				| "H" | "I" | "J" | "K" | "L" | "M" | "N"
 				| "O" | "P" | "Q" | "R" | "S" | "T" | "U"
-				| "V" | "W" | "X" | "Y" | "Z" ;
+				| "V" | "W" | "X" | "Y" | "Z"
+                | any lowercase ASCII letter;
 <NUMBER>	::=	  "0" | "1" | "2" | "3" | "4" | "5" | "6" 
 				| "7" | "8" | "9";
 <NON_ZERO_NUMBER> ::= "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";

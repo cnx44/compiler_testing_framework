@@ -37,6 +37,31 @@ class StubRunner(ProgramRunner):
 
 
 class ProgramRunnerTest(unittest.TestCase):
+    @patch("src.campaign_runner.subprocess.run")
+    def test_lldb_snapshot_options_precede_inferior_arguments(self, process):
+        runner = StubRunner()
+        runner.exe = "/tmp/program"
+        runner._run_debugger("lldb", "main", ["-o", "literal argument"])
+        command = process.call_args.args[0]
+        delimiter = command.index("--")
+        self.assertIn("command script import", command[delimiter - 1])
+        self.assertEqual(command[delimiter + 1:], ["/tmp/program", "-o", "literal argument"])
+
+    @patch("src.campaign_runner.subprocess.run")
+    def test_disabled_measurement_runs_once_and_still_collects_state(self, process):
+        process.return_value = subprocess.CompletedProcess([], 0, "ok", "")
+        runner = StubRunner()
+        runner._debug_snapshot = Mock(return_value={"variables": {}, "registers": {}})
+        with tempfile.NamedTemporaryFile(suffix=".c") as source:
+            try:
+                runner.compile([source.name])
+                results = runner.execute(measurement_repetitions=9, measure_overhead=False)
+            finally:
+                runner.cleanup()
+        process.assert_called_once()
+        runner._debug_snapshot.assert_called_once()
+        self.assertEqual(results["measurement_repetitions"], 1)
+
     def test_is_abstract(self):
         with self.assertRaises(TypeError):
             ProgramRunner(Environment())
@@ -88,7 +113,7 @@ class ProgramRunnerTest(unittest.TestCase):
         self.assertEqual(results["execution_time_samples_seconds"], [0.25])
         self.assertEqual(results["execution_time_stddev_seconds"], 0.0)
         self.assertEqual(results["execution_time_standard_error_seconds"], 0.0)
-        self.assertEqual(results["execution_repetitions"], 1)
+        self.assertEqual(results["measurement_repetitions"], 1)
         self.assertEqual(results["binary_size_bytes"], 6)
         self.assertEqual(runner.size, 6)
         self.assertEqual(runner.compiled_sources, [Path(source.name)])
@@ -129,7 +154,7 @@ class ProgramRunnerTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".c") as source:
             runner.compile([source.name])
             try:
-                results = runner.execute([], [], execution_repetitions=2)
+                results = runner.execute([], [], measurement_repetitions=2)
             finally:
                 runner.cleanup()
 
@@ -139,7 +164,7 @@ class ProgramRunnerTest(unittest.TestCase):
         self.assertAlmostEqual(
             results["execution_time_standard_error_seconds"], 1.0
         )
-        self.assertEqual(results["execution_repetitions"], 2)
+        self.assertEqual(results["measurement_repetitions"], 2)
         self.assertEqual(run_process.call_count, 2)
 
     @patch("src.campaign_runner.subprocess.run")
@@ -180,7 +205,7 @@ class ProgramRunnerTest(unittest.TestCase):
             runner.compile([source.name])
             try:
                 with self.assertRaisesRegex(ValueError, "positive integer"):
-                    runner.execute(execution_repetitions=0)
+                    runner.execute(measurement_repetitions=0)
             finally:
                 runner.cleanup()
 
@@ -594,12 +619,12 @@ class CampaignRunTest(unittest.TestCase):
             lambda programs, flags: order.append("aspis compile")
         )
         oracle_class.return_value.execute.side_effect = (
-            lambda args, variables, repetitions, functions: (
+            lambda args, variables, repetitions, functions, **kwargs: (
                 order.append("oracle execute") or oracle_results
             )
         )
         aspis_class.return_value.execute.side_effect = (
-            lambda args, variables, repetitions, functions: (
+            lambda args, variables, repetitions, functions, **kwargs: (
                 order.append("aspis execute") or aspis_results
             )
         )
@@ -627,7 +652,7 @@ class CampaignRunTest(unittest.TestCase):
             ["main.c", "helper.cpp"], ["-lm"]
         )
         oracle_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"], 5, ["main"]
+            ["a", "b"], ["x"], 5, ["main"], measure_overhead=True
         )
         aspis_class.assert_called_once_with(
             environment,
@@ -640,11 +665,11 @@ class CampaignRunTest(unittest.TestCase):
             ["main.c", "helper.cpp"], ["-lm"]
         )
         aspis_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"], 5, ["main"]
+            ["a", "b"], ["x"], 5, ["main"], measure_overhead=True
         )
         self.assertEqual(
             order,
-            ["oracle compile", "aspis compile", "oracle execute", "aspis execute"],
+            ["oracle compile", "oracle execute", "aspis compile", "aspis execute"],
         )
         self.assertIn("returncode: OK", log)
         self.assertIn("Compiler flags: -lm", log)
@@ -782,7 +807,7 @@ class CampaignRunTest(unittest.TestCase):
 
         oracle_class.return_value.compile.assert_called_once_with([str(source)], [])
         oracle_class.return_value.execute.assert_called_once_with(
-            ["first", "second"], ["x"], 1, ["main"]
+            ["first", "second"], ["x"], 1, ["main"], measure_overhead=True
         )
 
     def test_skips_run_without_supported_entry_source(self):
@@ -793,7 +818,7 @@ class CampaignRunTest(unittest.TestCase):
                 str(Path(directory) / "campaign.log"),
             )
             log = runner.run_campaign()
-        self.assertIn("No C or C++ source file found.", log)
+        self.assertTrue(any("ERROR: CONFIGURATION" in line and "No C or C++ source file" in line for line in log))
 
     @patch("src.campaign_runner.OracleRunner")
     def test_records_runner_errors_and_continues(self, oracle_class):

@@ -27,9 +27,11 @@ class ConfigBuilderTest(unittest.TestCase):
                 control_flow_protection=ControlFlowMode.INTER_RASM,
                 timeout_ms=7000,
                 execution_repetitions=3,
+                measure_overhead=False,
+                measurement_repetitions=7,
                 compiler_flags=["-O2", "-lm"],
-                injection=GlobalInjection("counter"),
-                functions=[TargetFunction("work", [TargetVariable("sum", 4)])],
+                injection=GlobalInjection(),
+                functions=[TargetFunction("work", [TargetVariable("sum", 4), TargetVariable("counter", is_global=True), TargetVariable("buffer", 8, True)])],
             )
         ])
 
@@ -43,9 +45,11 @@ class ConfigBuilderTest(unittest.TestCase):
                 "control_flow_protection: inter-rasm\n"
                 "timeout_ms: 7000\n"
                 "execution_repetitions: 3\n"
+                "measure_overhead: false\n"
+                "measurement_repetitions: 7\n"
                 "compiler_flags: [-O2, -lm]\n"
-                "injection: global target_global: counter\n"
-                "functions: [work(sum:4)]\n"
+                "injection: global\n"
+                "functions: [work(sum:4, @counter, @buffer:8)]\n"
             ),
         )
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as file:
