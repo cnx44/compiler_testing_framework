@@ -6,3 +6,7 @@ note.md
 .aspis-tui.json
 .inferior_out.txt
 configs
+campaign_summary_*.json
+*.cfg
+*.log
+tutorial.md

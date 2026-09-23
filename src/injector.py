@@ -112,19 +112,11 @@ class BaseInjector(ABC):
         """Returns the specific GDB Python script path to execute."""
         pass
 
-    @property
-    @abstractmethod
-    def lldb_script(self) -> str:
-        """Returns the specific LLDB Python script path to execute."""
-        pass
-
     def _debuggers(self) -> list[str]:
         if self.debugger is not None:
             candidates = [self.debugger]
-        elif platform.system() == "Darwin":
-            candidates = [self.env.lldb_executable, self.env.gdb_executable]
         else:
-            candidates = [self.env.gdb_executable, self.env.lldb_executable]
+            candidates = [self.env.gdb_executable]
 
         available = []
         for debugger in candidates:
@@ -132,16 +124,8 @@ class BaseInjector(ABC):
                 available.append(str(debugger))
         return available
 
-    def _debugger_flavor(self, debugger: str) -> str:
-        name = Path(debugger).name.lower()
-        if "gdb" in name:
-            return "gdb"
-        if "lldb" in name:
-            return "lldb"
-        raise ValueError(f"Unsupported debugger: {debugger}")
-
     def _script_for(self, debugger: str) -> str:
-        return self.gdb_script if self._debugger_flavor(debugger) == "gdb" else self.lldb_script
+        return self.gdb_script
 
     def _debugger_command(
         self,
@@ -150,15 +134,9 @@ class BaseInjector(ABC):
         args: list[str] | None = None,
     ) -> list[str | Path]:
         args = args or []
-        if self._debugger_flavor(debugger) == "gdb":
-            return [
-                debugger, "--batch", "-q", "-x", script,
-                "--args", self.target_bin, *args,
-            ]
         return [
-            debugger, "--batch", "--no-lldbinit",
-            "-o", f"command script import {shlex.quote(str(script))}",
-            "--", self.target_bin, *args,
+            debugger, "--batch", "-q", "-x", script,
+            "--args", self.target_bin, *args,
         ]
 
     def _ordered_debuggers(self) -> list[str]:
@@ -185,11 +163,7 @@ class BaseInjector(ABC):
         env["INFERIOR_OUT"] = os.devnull
         errors = []
         for debugger in self._ordered_debuggers():
-            profile_script = self.base_dir / (
-                "profile_target.py"
-                if self._debugger_flavor(debugger) == "gdb"
-                else "profile_target_lldb.py"
-            )
+            profile_script = self.base_dir / "profile_target.py"
             try:
                 result = subprocess.run(
                     self._debugger_command(debugger, str(profile_script), self._profile_args),
@@ -220,7 +194,7 @@ class BaseInjector(ABC):
                 return profile_data
             errors.append(f"{debugger}: {result.stderr.strip() or result.stdout.strip()}")
 
-        details = "\n".join(errors) or "Neither gdb nor lldb is installed."
+        details = "\n".join(errors) or "gdb is not installed."
         raise RuntimeError(f"Target profiling failed:\n{details}")
 
     def run(self, args: list[str] | None = None) -> ExecutionResult:
@@ -244,7 +218,7 @@ class BaseInjector(ABC):
         debuggers = self._ordered_debuggers()
         if not debuggers:
             inferior_out.unlink(missing_ok=True)
-            raise RuntimeError("Neither gdb nor lldb is installed.")
+            raise RuntimeError("gdb is not installed.")
 
         errors = []
         for index, debugger in enumerate(debuggers):
@@ -382,10 +356,6 @@ class RegisterInjector(BaseInjector):
     def gdb_script(self) -> str:
         return str(self.base_dir / "inject_registers.py")
 
-    @property
-    def lldb_script(self) -> str:
-        return str(self.base_dir / "inject_registers_lldb.py")
-
     def setup(self) -> dict:
         profile_data = self.profile_target()
         if "MAX_STEPS" not in profile_data or "TARGET_REGS" not in profile_data:
@@ -411,10 +381,6 @@ class MemoryInjector(BaseInjector):
     def gdb_script(self) -> str:
         return str(self.base_dir / "inject_memory.py")
 
-    @property
-    def lldb_script(self) -> str:
-        return str(self.base_dir / "inject_memory_lldb.py")
-
     def setup(self) -> dict:
         profile_data = self.profile_target()
         if "MAX_STEPS" not in profile_data:
@@ -439,10 +405,6 @@ class GlobalInjector(BaseInjector):
     def gdb_script(self) -> str:
         return str(self.base_dir / "inject_globals.py")
 
-    @property
-    def lldb_script(self) -> str:
-        return str(self.base_dir / "inject_globals_lldb.py")
-
     def setup(self) -> dict:
         profile_data = self.profile_target()
         if "MAX_STEPS" not in profile_data:
@@ -462,10 +424,6 @@ class NormalExecution(BaseInjector):
     @property
     def gdb_script(self) -> str:
         return str(self.base_dir / "extract_baseline_state.py")
-
-    @property
-    def lldb_script(self) -> str:
-        return str(self.base_dir / "extract_baseline_state_lldb.py")
 
     def setup(self) -> dict:
         return {}

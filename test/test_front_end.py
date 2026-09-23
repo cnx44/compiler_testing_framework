@@ -411,7 +411,6 @@ class FrontEndSupportTest(unittest.TestCase):
             vanilla_compiler="clang-21",
             llvm_path="/opt/llvm/bin",
             gdb_executable="gdb",
-            lldb_executable="gdb",
             aspis_flags=["--no-cleanup", "--coarse-grained"],
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -460,7 +459,6 @@ class FrontEndSupportTest(unittest.TestCase):
             vanilla_compiler="clang-21",
             llvm_path="/opt/llvm/bin",
             gdb_executable="gdb",
-            lldb_executable="gdb",
             aspis_flags=["--no-cleanup"],
         )
         with tempfile.TemporaryDirectory() as directory:

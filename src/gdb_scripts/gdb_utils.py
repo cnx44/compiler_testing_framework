@@ -68,6 +68,8 @@ def continue_to_function_return(entry_func="main"):
 def continue_and_dump_state():
     """Continues to the configured function return and dumps its state."""
     entry_func = os.environ.get("ENTRY_FUNC", "main")
+    vars_to_check_str = os.environ.get("VARS_TO_CHECK", "")
+    vars_to_check = [v.strip() for v in vars_to_check_str.split(",") if v.strip()]
 
     try:
         continue_to_function_return(entry_func)
@@ -86,6 +88,15 @@ def continue_and_dump_state():
         gdb.execute('printf "@@LOCALS@@\\n"')
         gdb.execute("info locals")
         
+        gdb.execute('printf "@@GLOBALS@@\\n"')
+        for var_name in vars_to_check:
+            gdb.execute(f'printf "{var_name} = "')
+            try:
+                gdb.execute(f"output {var_name}")
+            except gdb.error as e:
+                print(f"<error: {e}>")
+            gdb.execute('printf "\\n"')
+            
         gdb.execute('printf "@@REGISTERS@@\\n"')
         gdb.execute("info registers")
     except gdb.error:

@@ -37,15 +37,7 @@ class StubRunner(ProgramRunner):
 
 
 class ProgramRunnerTest(unittest.TestCase):
-    @patch("src.campaign_runner.subprocess.run")
-    def test_lldb_snapshot_options_precede_inferior_arguments(self, process):
-        runner = StubRunner()
-        runner.exe = "/tmp/program"
-        runner._run_debugger("lldb", "main", ["-o", "literal argument"])
-        command = process.call_args.args[0]
-        delimiter = command.index("--")
-        self.assertIn("command script import", command[delimiter - 1])
-        self.assertEqual(command[delimiter + 1:], ["/tmp/program", "-o", "literal argument"])
+
 
     @patch("src.campaign_runner.subprocess.run")
     def test_disabled_measurement_runs_once_and_still_collects_state(self, process):
@@ -240,7 +232,7 @@ class ProgramRunnerTest(unittest.TestCase):
             [call([], None, "work"), call([], None, "helper")],
         )
 
-    def test_parses_gdb_and_lldb_snapshot_formats(self):
+    def test_parses_gdb_snapshot_formats(self):
         runner = StubRunner()
         output = """noise
 @@ARGS@@
@@ -268,33 +260,7 @@ rbx = 0x2
             {"rax": "0x1", "rbx": "0x2"},
         )
 
-    def test_debug_snapshot_tries_next_debugger_after_failure(self):
-        runner = StubRunner()
-        runner.src = __file__
-        runner._debuggers = Mock(return_value=["gdb", "lldb"])
-        valid_output = """@@ARGS@@
-argc = 1
-@@LOCALS@@
-x = 2
-@@REGISTERS@@
-rax = 0x1
-"""
-        runner._run_debugger = Mock(
-            side_effect=[
-                subprocess.CompletedProcess([], 1, "", "gdb failed"),
-                subprocess.CompletedProcess([], 0, valid_output, ""),
-            ]
-        )
 
-        snapshot = runner._debug_snapshot([], target_function="work")
-
-        self.assertEqual(snapshot["variables"]["x"], "2")
-        self.assertEqual(snapshot["registers"]["rax"], "0x1")
-        self.assertEqual(runner._run_debugger.call_count, 2)
-        self.assertEqual(
-            runner._run_debugger.call_args_list,
-            [call("gdb", "work", [], None), call("lldb", "work", [], None)],
-        )
 
     def test_debug_snapshot_collects_requested_global_variables(self):
         runner = StubRunner()
@@ -322,22 +288,7 @@ rax = 0x2
         self.assertEqual(snapshot["registers"], {"rax": "0x2"})
         runner._run_debugger.assert_called_once_with("gdb", "main", [], ["sum"])
 
-    def test_debug_snapshot_tries_next_debugger_after_timeout(self):
-        runner = StubRunner(timeout_ms=1250)
-        runner._debuggers = Mock(return_value=["gdb", "lldb"])
-        runner._run_debugger = Mock(
-            side_effect=[
-                subprocess.TimeoutExpired(["gdb"], 1.25),
-                subprocess.CompletedProcess(
-                    [], 0, "@@ARGS@@\n@@LOCALS@@\n@@REGISTERS@@\nrax = 0x1\n", ""
-                ),
-            ]
-        )
 
-        snapshot = runner._debug_snapshot([])
-
-        self.assertEqual(snapshot["registers"], {"rax": "0x1"})
-        self.assertEqual(runner._run_debugger.call_count, 2)
 
     @patch("src.campaign_runner.subprocess.run")
     def test_gdb_command_prints_requested_global_variables(self, run_process):
@@ -354,19 +305,7 @@ rax = 0x2
         self.assertEqual(kwargs["env"]["TARGET_FUNC"], "work")
         self.assertEqual(kwargs["timeout"], 5)
 
-    @patch("src.campaign_runner.subprocess.run")
-    def test_lldb_command_prints_requested_global_variables(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = StubRunner()
-        runner.exe = "/tmp/program"
-        runner.src = "main.c"
 
-        runner._run_debugger("lldb", "work", [], ["sum"])
-
-        kwargs = run_process.call_args.kwargs
-        self.assertIn("env", kwargs)
-        self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
-        self.assertEqual(kwargs["env"]["TARGET_FUNC"], "work")
 
     def test_debugger_rejects_invalid_variable_names(self):
         with self.assertRaisesRegex(ValueError, "bad-name"):
@@ -379,7 +318,7 @@ rax = 0x2
     def test_debug_snapshot_reports_when_no_debugger_is_available(self):
         runner = StubRunner()
         runner._debuggers = Mock(return_value=[])
-        with self.assertRaisesRegex(RuntimeError, "Neither gdb nor lldb"):
+        with self.assertRaisesRegex(RuntimeError, "gdb is not installed"):
             runner._debug_snapshot([])
 
     def test_debugger_command_rejects_unknown_debugger(self):

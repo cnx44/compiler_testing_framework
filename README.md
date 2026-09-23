@@ -3,7 +3,7 @@
 Questo progetto automatizza il confronto fra un programma compilato normalmente
 (`Oracle`) e lo stesso programma protetto con ASPIS. Esegue entrambi i binari,
 misura tempo e dimensione, acquisisce lo stato al termine delle funzioni scelte,
-inietta fault tramite GDB o LLDB e classifica gli effetti osservati.
+inietta fault tramite GDB e classifica gli effetti osservati.
 
 Il progetto comprende:
 
@@ -11,7 +11,7 @@ Il progetto comprende:
 - una TUI curses per creare, modificare, eseguire e consultare campagne;
 - runner separati per il binario Oracle e quello ASPIS;
 - injector polimorfici per registri, memoria e variabili globali;
-- script Python eseguiti dentro GDB/LLDB;
+- script Python eseguiti dentro GDB;
 - log testuali e riepiloghi JSON utilizzabili anche fuori dalla TUI.
 
 > Il runner non contiene ASPIS: usa un'installazione esterna tramite il relativo
@@ -72,7 +72,7 @@ Il flusso dei dati è il seguente:
                             |              /      \                                      |
                             v             /        \                                     |
                 +---------------------+  /          \                                    |
-                |  Snapshot GDB/LLDB  |<+            v                                   |
+                |    Snapshot GDB     |<+            v                                   |
                 +---------------------+   +----------------------------------+           |
                          |                |  BaseInjector.create_for_target  |           |
                          |                +----------------------------------+           |
@@ -85,7 +85,7 @@ Il flusso dei dati è il seguente:
                          |             \                   |                  /          |
                          |              \                  v                 /           |
                          |               +------> +-----------------+ <-----+            |
-                         |                        | Script GDB/LLDB |                    |
+                         |                        |   Script GDB    |                    |
                          |                        +-----------------+                    |
                          |                                 |                             |
                          v                                 v                             |
@@ -119,7 +119,7 @@ Il flusso dei dati è il seguente:
 | `src/campaign_runner.py` | Compilazione Oracle/ASPIS, esecuzioni normali, snapshot, misure, orchestrazione delle injection e scrittura dei risultati. |
 | `src/injector.py` | Factory e classi degli injector, profiling, avvio debugger, timeout e classificazione dell'evento. |
 | `src/models.py` | `ExecutionState`, `ExecutionResult` e `TerminationEvent`. |
-| `src/gdb_scripts/` | Script caricati dentro GDB/LLDB per profiling, snapshot e bit flip. |
+| `src/gdb_scripts/` | Script caricati dentro GDB per profiling, snapshot e bit flip. |
 | `src/aspis_handlers.c` | Handler collegati automaticamente al binario protetto per rendere riconoscibili le detection ASPIS. |
 | `test/` | Unit test e test dinamici che avviano realmente GDB. |
 | `samples/` | Programmi e configurazioni di esempio. |
@@ -248,9 +248,8 @@ Con `main` il punto osservato è quindi il ritorno di `main`. Se la funzione non
 viene chiamata, è stata eliminata/inlined o non dispone di informazioni di debug 
 sufficienti, lo snapshot può fallire.
 
-Su Linux viene preferito GDB, su macOS LLDB. Quando nessun debugger è imposto
-esplicitamente, il codice può provare l'altro backend se il primo non riesce ad
-avviare il processo o non produce uno stato valido.
+Su Linux e macOS viene usato GDB. Quando nessun debugger è imposto
+esplicitamente (il default), viene risolto l'eseguibile `gdb` nel `PATH` di sistema.
 
 ## Installazione
 
@@ -261,7 +260,7 @@ Servono:
 - Python 3 con supporto `curses`;
 - `pip` e un ambiente virtuale consigliato;
 - un compilatore C/C++, normalmente `clang`;
-- GDB oppure LLDB con supporto Python;
+- GDB con supporto Python;
 - ASPIS compilato;
 - una toolchain LLVM compatibile con i plugin ASPIS.
 
@@ -310,7 +309,7 @@ La voce **Configure toolchain** configura:
 | `ASPIS script` | Percorso eseguibile di `aspis.sh`. |
 | `LLVM bin directory` | Directory che deve contenere almeno `clang`, `opt` e `llvm-link`. |
 | `Oracle compiler` | Comando usato per compilare il binario non protetto. |
-| `Debugger` | GDB o LLDB, anche tramite percorso assoluto. |
+
 | `Additional ASPIS flags` | Opzioni destinate allo script ASPIS, per esempio `--no-cleanup --coarse-grained`. |
 
 Le impostazioni vengono salvate in `.aspis-tui.json` nella directory dalla
@@ -673,8 +672,8 @@ python -m src.front_end
 
 La UI è in inglese. I comandi comuni sono:
 
-- `↑` / `↓`: spostamento o scroll;
-- `←` / `→`: cambio test o risultato selezionato;
+- `↑` / `↓` o `j` / `k`: spostamento o scroll;
+- `←` / `→` o `h` / `l`: cambio test o risultato selezionato;
 - `Enter`: apertura o conferma;
 - `Space`: selezione multipla dei file;
 - `Esc` o, dove indicato, `q`: ritorno o uscita;
@@ -714,6 +713,10 @@ Il form espone direttamente i campi della grammatica. **Validate and save**
 controlla nome, file, interi positivi e sintassi completa prima di chiedere la
 directory e il nome del `.cfg`. In caso d'errore si ritorna allo stesso form con
 i valori inseriti ancora presenti.
+Se si selezionano più opzioni per le protezioni dati, control flow o injection,
+la TUI genera automaticamente una matrice di test indipendenti per tutte le
+combinazioni possibili.
+
 Il salvataggio su un file esistente richiede conferma. Nei campi di testo il
 valore attuale è modificabile: `Enter` lo conserva, `Ctrl-U` lo svuota,
 `Esc` annulla subito e `:q` esce dall'applicazione.
@@ -723,6 +726,8 @@ valore attuale è modificabile: `Enter` lo conserva, `Ctrl-U` lo svuota,
 Il batch seleziona una directory e crea un test indipendente per ogni sorgente
 direttamente contenuto al suo interno. La scansione non è ricorsiva. Ogni test
 eredita protezioni, timeout, ripetizioni, flag, injection e funzioni del form.
+Anche in questo caso, selezioni multiple di protezione o injection generano la
+matrice completa delle combinazioni per ogni sorgente.
 
 Se il nome base è `experiment` e la cartella contiene `alpha.c` e `beta.cpp`, i
 test generati si chiamano `experiment-alpha` e `experiment-beta`.
@@ -875,7 +880,7 @@ Prima viene determinato l'evento del processo:
 |---|---|---|
 | `RETURNED` | Il processo ha raggiunto il punto di snapshot. | Ulteriore confronto: Masked, Latent o SDC. |
 | `TIMEOUT` | Il debugger/inferior ha superato `timeout_ms`. | Timeout. |
-| `CRASHED` | GDB/LLDB riporta un segnale, per esempio SIGSEGV o SIGILL. | Crash. |
+| `CRASHED` | GDB riporta un segnale, per esempio SIGSEGV o SIGILL. | Crash. |
 | `ASPIS_DATA` | È comparsa la stringa dell'handler di corruzione dati. | ASPIS Data. |
 | `ASPIS_CF` | È comparsa la stringa dell'handler di control-flow mismatch. | ASPIS CF. |
 | `INTERNAL_ERROR` | Lo script debugger ha prodotto un errore fatale o non ha estratto lo stato. | Attualmente contato come Crash. |
@@ -950,7 +955,7 @@ Viene applicato a:
 
 - ogni esecuzione normale Oracle;
 - ogni esecuzione normale ASPIS;
-- ogni processo di snapshot GDB/LLDB;
+- ogni processo di snapshot GDB;
 - ogni profiling dell'injector;
 - ogni fault injection.
 
@@ -1019,8 +1024,9 @@ fault.
 
 ### `No global variables found to inject`
 
-Specificare una globale esplicita con `target_global`, oppure verificare che la
-globale sia presente nelle informazioni di debug del primo sorgente elencato in
+Specificare una globale esplicita aggiungendo `@variabile` alla dichiarazione della
+funzione (es. `functions: [main(@counter)]`), oppure verificare che la globale
+sia presente nelle informazioni di debug del primo sorgente elencato in
 `programs`.
 
 ### Configurazione valida ma sorgente non trovato
@@ -1085,10 +1091,9 @@ La modifica tipica attraversa questi livelli:
 2. estendere `grammar.lark` e `RunnerConfigTransformer`;
 3. aggiornare `config_builder.py` per il round-trip;
 4. esporre la scelta nell'editor della TUI;
-5. creare una sottoclasse di `BaseInjector` con `setup`, `gdb_script` e
-   `lldb_script`;
+5. creare una sottoclasse di `BaseInjector` con `setup` e `gdb_script`;
 6. aggiungere il caso alla factory `BaseInjector.create_for_target()`;
-7. implementare gli script GDB e LLDB corrispondenti;
+7. implementare lo script GDB corrispondente;
 8. aggiungere test di parser, factory, comando debugger e classificazione.
 
 `CampaignRun` non dovrebbe conoscere i dettagli concreti dell'injector: deve

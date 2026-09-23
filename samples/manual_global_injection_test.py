@@ -48,7 +48,6 @@ def run_tests():
         
         env = Environment()
         env.gdb_executable = "gdb"
-        env.lldb_executable = "lldb"
         
         print("# Global Variables Fault Injection Tests\\n")
         print("The test program defines three global variables:")

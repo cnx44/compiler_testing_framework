@@ -11,7 +11,6 @@ class EnvironmentTest(unittest.TestCase):
         self.assertEqual(environment.vanilla_compiler, "clang")
         self.assertEqual(environment.llvm_path, "")
         self.assertEqual(environment.gdb_executable, "gdb")
-        self.assertEqual(environment.lldb_executable, "lldb")
         self.assertEqual(environment.aspis_flags, [])
 
     def test_default_aspis_flags_are_independent(self):
@@ -27,9 +26,8 @@ class EnvironmentTest(unittest.TestCase):
         self.assertEqual(environment.llvm_path, "/llvm/bin")
 
     def test_accepts_custom_debugger_paths(self):
-        environment = Environment(gdb_executable="/opt/gdb-multiarch", lldb_executable="/usr/local/bin/lldb-17")
+        environment = Environment(gdb_executable="/opt/gdb-multiarch")
         self.assertEqual(environment.gdb_executable, "/opt/gdb-multiarch")
-        self.assertEqual(environment.lldb_executable, "/usr/local/bin/lldb-17")
 
 
 class ModelsTest(unittest.TestCase):

@@ -231,16 +231,14 @@ class ProgramRunner(ABC):
                 return {"variables": variables, "registers": registers}
             errors.append(f"{debugger}: no registers were found")
 
-        details = "\n".join(errors) or "Neither gdb nor lldb is installed."
+        details = "\n".join(errors) or "gdb is not installed."
         raise RuntimeError(f"Debug snapshot failed:\n{details}")
 
     def _debuggers(self):
         if self.debugger is not None:
             candidates = [self.debugger]
-        elif platform.system() == "Darwin":
-            candidates = [self.environment.lldb_executable, self.environment.gdb_executable]
         else:
-            candidates = [self.environment.gdb_executable, self.environment.lldb_executable]
+            candidates = [self.environment.gdb_executable]
         return [debugger for debugger in candidates if shutil.which(debugger)]
 
     def _run_debugger(
@@ -253,11 +251,7 @@ class ProgramRunner(ABC):
         variable_names = self._debug_variable_names(variables_to_check or [])
         target_function = self._debug_function_name(target_function)
         debugger_name = Path(debugger).name.lower()
-        if "gdb" in debugger_name:
-            flavor = "gdb"
-        elif "lldb" in debugger_name:
-            flavor = "lldb"
-        else:
+        if "gdb" not in debugger_name:
             raise ValueError(f"Unsupported debugger: {debugger}")
         
         run_env = os.environ.copy()
@@ -267,20 +261,12 @@ class ProgramRunner(ABC):
         
         base_dir = Path(__file__).parent / "gdb_scripts"
         
-        if flavor == "gdb":
-            script = base_dir / "snapshot_gdb.py"
-            command = [
-                debugger, "--batch", "-q",
-                "-x", str(script),
-                "--args", self.exe, *args
-            ]
-        elif flavor == "lldb":
-            script = base_dir / "snapshot_lldb.py"
-            command = [
-                debugger, "--batch", "--no-lldbinit",
-                "-o", f"command script import {shlex.quote(str(script))}",
-                "--", self.exe, *args,
-            ]
+        script = base_dir / "snapshot_gdb.py"
+        command = [
+            debugger, "--batch", "-q",
+            "-x", str(script),
+            "--args", self.exe, *args
+        ]
             
         return subprocess.run(
             command,

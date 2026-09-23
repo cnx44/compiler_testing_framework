@@ -158,14 +158,12 @@ class AspisTui:
             "aspis_path": str(self.environment.aspis_path),
             "llvm_path": str(self.environment.llvm_path),
             "vanilla_compiler": self.environment.vanilla_compiler,
-            "debugger": self.environment.gdb_executable,
             "aspis_flags": shlex.join(self.environment.aspis_flags),
         }
         fields = (
             ("aspis_path", "Script ASPIS"),
             ("llvm_path", "LLVM bin directory"),
             ("vanilla_compiler", "Oracle compiler"),
-            ("debugger", "Debugger"),
             ("aspis_flags", "Additional ASPIS flags"),
         )
         selected = 0
@@ -1185,13 +1183,11 @@ def _expanded_path(value: str) -> str:
 
 
 def _environment_from_values(values: dict[str, str]) -> Environment:
-    debugger = values.get("debugger", "") or "gdb"
     return Environment(
         aspis_path=_expanded_path(values.get("aspis_path", "")),
         vanilla_compiler=values.get("vanilla_compiler", "") or "clang",
         llvm_path=_expanded_path(values.get("llvm_path", "")),
-        gdb_executable=debugger,
-        lldb_executable=debugger,
+        gdb_executable="gdb",
         aspis_flags=shlex.split(values.get("aspis_flags", "")),
     )
 
@@ -1201,7 +1197,6 @@ def _toolchain_payload(environment: Environment) -> dict:
         "aspis_path": str(environment.aspis_path),
         "llvm_path": str(environment.llvm_path),
         "vanilla_compiler": environment.vanilla_compiler,
-        "debugger": environment.gdb_executable,
         "aspis_flags": list(environment.aspis_flags),
     }
 
@@ -1231,7 +1226,6 @@ def _load_toolchain(path: Path, fallback: Environment) -> Environment:
         "vanilla_compiler": str(
             payload.get("vanilla_compiler", fallback.vanilla_compiler)
         ),
-        "debugger": str(payload.get("debugger", fallback.gdb_executable)),
         "aspis_flags": shlex.join(flags),
     }
     return _environment_from_values(values)
@@ -1513,7 +1507,6 @@ def main() -> None:
     parser.add_argument("--aspis-path", default=os.environ.get("ASPIS_PATH"))
     parser.add_argument("--compiler", default=os.environ.get("ASPIS_COMPILER"))
     parser.add_argument("--llvm-path", default=os.environ.get("ASPIS_LLVM_PATH"))
-    parser.add_argument("--debugger", default=os.environ.get("ASPIS_DEBUGGER"))
     parser.add_argument("--aspis-flags", default=os.environ.get("ASPIS_FLAGS"))
     args = parser.parse_args()
     start_dir = Path.cwd().resolve()
@@ -1529,7 +1522,6 @@ def main() -> None:
                 "aspis_path": args.aspis_path or str(saved.aspis_path),
                 "llvm_path": args.llvm_path or str(saved.llvm_path),
                 "vanilla_compiler": args.compiler or saved.vanilla_compiler,
-                "debugger": args.debugger or saved.gdb_executable,
                 "aspis_flags": (
                     args.aspis_flags
                     if args.aspis_flags is not None
