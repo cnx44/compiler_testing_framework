@@ -497,7 +497,7 @@ class CampaignRun:
         self.results = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.summary_path = self.log_path.with_name(
-            f"campaign_summary_{timestamp}.json"
+            f"{self.log_path.stem}_summary_{timestamp}.json"
         )
         def report(phase):
             if progress is not None:
