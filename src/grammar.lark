@@ -18,7 +18,7 @@ functions: FUNCTIONS_K "[" function_list? "]" NL
 function_list: function_def ("," function_def)*
 function_def: WORD ("(" var_list ")")?
 var_list: var_def ("," var_def)*
-var_def: GLOBAL_MARKER? WORD (":" POSITIVE_INT)?
+var_def: GLOBAL_MARKER? WORD (":" (POSITIVE_INT | WORD))?
 
 programs: program ("," program)*
 program: PROGRAM_PATH | ESCAPED_STRING

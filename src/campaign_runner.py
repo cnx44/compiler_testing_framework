@@ -74,12 +74,15 @@ class ProgramRunner(ABC):
         measurement_repetitions: int = 100,
         functions_to_check: list[str] | None = None,
         measure_overhead: bool = True,
+        var_lengths: dict[str, str] | None = None,
     ):
         """Execute an already compiled binary and collect its observable state."""
         if self._build_dir is None or not Path(self.exe).is_file():
             raise RuntimeError("The program must be compiled before it can be executed.")
         if measure_overhead and (type(measurement_repetitions) is not int or measurement_repetitions < 1):
             raise ValueError("measurement_repetitions must be a positive integer when measure_overhead is true.")
+
+        self.var_lengths = var_lengths or {}
 
         args = args or []
         execution_times = []
@@ -157,6 +160,7 @@ class ProgramRunner(ABC):
         measurement_repetitions: int = 1,
         functions_to_check: list[str] | None = None,
         measure_overhead: bool = True,
+        var_lengths: dict[str, str] | None = None,
     ):
         """Compile and execute a program, cleaning temporary artifacts afterwards."""
         try:
@@ -167,6 +171,7 @@ class ProgramRunner(ABC):
                 measurement_repetitions,
                 functions_to_check,
                 measure_overhead=measure_overhead,
+                var_lengths=var_lengths,
             )
         finally:
             self.cleanup()
@@ -217,13 +222,13 @@ class ProgramRunner(ABC):
             )
             variables = {
                 **self._parse_debug_variables(
-                    debug_result.stdout, "@@GLOBALS@@", "@@REGISTERS@@"
-                ),
-                **self._parse_debug_variables(
                     debug_result.stdout, "@@ARGS@@", "@@LOCALS@@"
                 ),
                 **self._parse_debug_variables(
                     debug_result.stdout, "@@LOCALS@@", locals_end
+                ),
+                **self._parse_debug_variables(
+                    debug_result.stdout, "@@GLOBALS@@", "@@REGISTERS@@"
                 ),
             }
             registers = self._parse_debug_registers(debug_result.stdout)
@@ -258,6 +263,9 @@ class ProgramRunner(ABC):
         run_env["TARGET_SRC"] = str(self.src)
         run_env["TARGET_FUNC"] = target_function
         run_env["VARS_TO_CHECK"] = ",".join(variable_names)
+        
+        if hasattr(self, "var_lengths") and self.var_lengths:
+            run_env["VAR_LENGTHS"] = ",".join(f"{k}:{v}" for k, v in self.var_lengths.items())
         
         base_dir = Path(__file__).parent / "gdb_scripts"
         
@@ -543,6 +551,13 @@ class CampaignRun:
                     vars_to_check = [
                         var.name for tf in run.functions for var in tf.variables
                     ]
+                    
+                    var_lengths = {}
+                    for tf in run.functions:
+                        for var in tf.variables:
+                            if var.length:
+                                var_lengths[var.name] = str(var.length)
+                                
                     functions_to_check = [tf.name for tf in run.functions]
                     measurement_repetitions = (
                         (run.measurement_repetitions if run.measurement_repetitions is not None
@@ -583,6 +598,7 @@ class CampaignRun:
                             measurement_repetitions,
                             functions_to_check,
                             measure_overhead=run.measure_overhead,
+                            var_lengths=var_lengths,
                         )
                         oracle_runners_cache[oracle_cache_key] = oracle_runner
 
@@ -608,6 +624,7 @@ class CampaignRun:
                             measurement_repetitions,
                             functions_to_check,
                             measure_overhead=run.measure_overhead,
+                            var_lengths=var_lengths,
                         )
                         aspis_runners_cache[aspis_cache_key] = aspis_runner
 
@@ -727,7 +744,12 @@ class CampaignRun:
                             
                             for variable in injected_function.variables:
                                 var_name = variable.name
-                                if state.variables.get(var_name) != oracle_vars.get(var_name):
+                                val1 = str(state.variables.get(var_name, ""))
+                                val2 = str(oracle_vars.get(var_name, ""))
+                                if val1 != val2:
+                                    import re as _re
+                                    if _re.fullmatch(r"0x[0-9a-fA-F]+", val1) and _re.fullmatch(r"0x[0-9a-fA-F]+", val2):
+                                        continue
                                     state_differs = True
                                     break
                                 

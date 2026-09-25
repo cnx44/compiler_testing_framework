@@ -36,7 +36,7 @@ class GlobalInjection:
 @dataclass(frozen=True)
 class TargetVariable:
     name: str
-    length: int | None = None
+    length: int | str | None = None
     is_global: bool = False
 
 @dataclass(frozen=True)
@@ -143,6 +143,8 @@ class RunnerConfigTransformer(Transformer):
             items = items[1:]
         name = items[0]
         length = items[1] if len(items) > 1 else None
+        if isinstance(length, str) and length.isdigit():
+            length = int(length)
         return TargetVariable(name=name, length=length, is_global=is_global)
         
     def var_list(self, items):

@@ -97,6 +97,20 @@ def continue_and_dump_state():
                 print(f"<error: {e}>")
             gdb.execute('printf "\\n"')
             
+        var_lengths_str = os.environ.get("VAR_LENGTHS", "")
+        if var_lengths_str:
+            gdb.execute('printf "@@LOCALS@@\\n"')
+            for pair in var_lengths_str.split(","):
+                if ":" in pair:
+                    var_name, var_len = pair.split(":", 1)
+                    var_name, var_len = var_name.strip(), var_len.strip()
+                    gdb.execute(f'printf "{var_name} = "')
+                    try:
+                        gdb.execute(f"output *{var_name}@{var_len}")
+                    except gdb.error as e:
+                        print(f"<error: {e}>")
+                    gdb.execute('printf "\\n"')
+            
         gdb.execute('printf "@@REGISTERS@@\\n"')
         gdb.execute("info registers")
     except gdb.error:
