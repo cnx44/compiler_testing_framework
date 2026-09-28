@@ -592,13 +592,15 @@ class CampaignRun:
                         report("Compiling Oracle")
                         oracle_runner.compile(run.programs, run.compiler_flags)
                         report(f"Oracle execution (measurements) and debugger snapshot")
+                        execute_kwargs = {"measure_overhead": run.measure_overhead}
+                        if var_lengths:
+                            execute_kwargs["var_lengths"] = var_lengths
                         oracle_results = oracle_runner.execute(
                             run_args,
                             vars_to_check,
                             measurement_repetitions,
                             functions_to_check,
-                            measure_overhead=run.measure_overhead,
-                            var_lengths=var_lengths,
+                            **execute_kwargs,
                         )
                         oracle_runners_cache[oracle_cache_key] = oracle_runner
 
@@ -618,13 +620,15 @@ class CampaignRun:
                         report("Compiling ASPIS")
                         aspis_runner.compile(run.programs, run.compiler_flags)
                         report(f"ASPIS execution (measurements) and debugger snapshot")
+                        execute_kwargs = {"measure_overhead": run.measure_overhead}
+                        if var_lengths:
+                            execute_kwargs["var_lengths"] = var_lengths
                         aspis_results = aspis_runner.execute(
                             run_args,
                             vars_to_check,
                             measurement_repetitions,
                             functions_to_check,
-                            measure_overhead=run.measure_overhead,
-                            var_lengths=var_lengths,
+                            **execute_kwargs,
                         )
                         aspis_runners_cache[aspis_cache_key] = aspis_runner
 

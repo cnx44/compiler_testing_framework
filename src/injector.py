@@ -46,8 +46,9 @@ class BaseInjector(ABC):
         common_kwargs = {
             "debugger": debugger,
             "timeout_ms": timeout_ms,
-            "var_lengths": var_lengths,
         }
+        if var_lengths:
+            common_kwargs["var_lengths"] = var_lengths
 
         if isinstance(injection, RegisterInjection):
             return [
@@ -279,9 +280,15 @@ class BaseInjector(ABC):
         
         if exit_code == 124:
             event = TerminationEvent.TIMEOUT
-        elif "Data corruption detected" in combined_out:
+        # Programs can override the weak default handlers with custom handlers
+        # that print these legacy markers and may exit successfully.
+        elif any(marker in combined_out for marker in (
+            "Data corruption detected", "DATA_CORRUPTION_DETECTED",
+        )):
             event = TerminationEvent.ASPIS_DATA
-        elif "Control-flow signature mismatch" in combined_out:
+        elif any(marker in combined_out for marker in (
+            "Control-flow signature mismatch", "SIG_MISMATCH_DETECTED",
+        )):
             event = TerminationEvent.ASPIS_CF
         elif (
             "Program received signal" in combined_out

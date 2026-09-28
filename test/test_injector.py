@@ -131,6 +131,8 @@ rax 0x4
             ("", "debugger failed", 1, TerminationEvent.INTERNAL_ERROR),
             ("Data corruption detected", "", 1, TerminationEvent.ASPIS_DATA),
             ("", "Control-flow signature mismatch", 1, TerminationEvent.ASPIS_CF),
+            ("DATA_CORRUPTION_DETECTED", "", 0, TerminationEvent.ASPIS_DATA),
+            ("", "SIG_MISMATCH_DETECTED", 0, TerminationEvent.ASPIS_CF),
             ("Program received signal SIGSEGV", "", 1, TerminationEvent.CRASHED),
             ("Program terminated with signal SIGILL", "", 1, TerminationEvent.CRASHED),
         ]
@@ -151,6 +153,29 @@ rax 0x4
                     self.assertIs(result.event, expected)
                     command = injector._extract_state.call_args
                     self.assertEqual(command.args[0:2], (stdout, stderr))
+
+    def test_custom_handler_detection_in_redirected_program_output(self):
+        for marker, expected in (
+            ("DATA_CORRUPTION_DETECTED", TerminationEvent.ASPIS_DATA),
+            ("SIG_MISMATCH_DETECTED", TerminationEvent.ASPIS_CF),
+        ):
+            with self.subTest(marker=marker):
+                injector = GlobalInjector(
+                    Environment(), "/tmp/program", __file__,
+                    target_global="B", debugger="gdb",
+                )
+
+                def run_debugger(*args, **kwargs):
+                    Path(kwargs["env"]["INFERIOR_OUT"]).write_text(marker)
+                    return subprocess.CompletedProcess([], 0, "exited normally", "")
+
+                with patch.object(injector, "setup", return_value={}), patch(
+                    "src.injector.subprocess.run", side_effect=run_debugger
+                ):
+                    result = injector.run()
+
+                self.assertIs(result.event, expected)
+                self.assertEqual(result.state.stdout, marker)
 
     @patch("src.injector.shutil.which", side_effect=lambda executable: executable)
     @patch("src.injector.subprocess.run")
