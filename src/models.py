@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict
+
 
 class TerminationEvent(Enum):
     RETURNED = "RETURNED"               # Reached the target return line successfully
@@ -15,9 +15,9 @@ class ExecutionState:
     stdout: str = ""
     stderr: str = ""
     debugger_output: str = ""
-    variables: Dict[str, str] = field(default_factory=dict)
-    registers: Dict[str, str] = field(default_factory=dict)
-    error: str = "" 
+    variables: dict[str, str] = field(default_factory=dict)
+    registers: dict[str, str] = field(default_factory=dict)
+    error: str = ""
 
 @dataclass
 class ExecutionResult:

@@ -1,47 +1,36 @@
-"""Parse the marker-delimited dumps printed by the scripts in ``gdb_scripts``.
-
-A dump looks like::
+"""Parse the state dump printed by ``gdb_utils.dump_state``::
 
     @@ARGS@@
     n = 3
     @@LOCALS@@
-    (int) x = 7
+    x = 7
     @@REGISTERS@@
     rax            0x7    7
 """
 
 import re
 
-_VARIABLE_NAME = re.compile(r"^\s*(?:\([^)]*\)\s*)?([A-Za-z_]\w*)$")
-_REGISTER_LINE = re.compile(r"^\s*(\S+)\s+(?:=\s+)?(\S+)")
+_VARIABLE_NAME = re.compile(r"[A-Za-z_]\w*")
+_REGISTER_LINE = re.compile(r"^\s*([a-z]\w*)\s+(\S+)")
 
 
-def section(output: str, start: str, end: str | None = None) -> str | None:
-    """Return the text between ``start`` and ``end``, or None without ``start``."""
-    if start not in output:
+def parse_dump(output: str) -> tuple[dict[str, str], dict[str, str]] | None:
+    """Return ``(variables, registers)``, or None when no register was dumped
+    (the program was no longer running)."""
+    if "@@ARGS@@" not in output or "@@REGISTERS@@" not in output:
         return None
-    text = output.split(start, 1)[1]
-    if end is not None and end in text:
-        text = text.split(end, 1)[0]
-    return text.strip()
+    variables_text, registers_text = output.split("@@ARGS@@", 1)[1].split("@@REGISTERS@@", 1)
 
-
-def parse_variables(text: str, keep_empty: bool = True) -> dict[str, str]:
     variables = {}
-    for line in text.splitlines():
-        if " = " not in line:
-            continue
-        name, value = line.split(" = ", 1)
-        match = _VARIABLE_NAME.match(name)
-        if match and (keep_empty or value.strip()):
-            variables[match.group(1)] = value.strip()
-    return variables
+    for line in variables_text.splitlines():
+        name, separator, value = line.partition(" = ")
+        # Later lines win: DUMP_VARS arrays replace the pointers of info locals.
+        if separator and _VARIABLE_NAME.fullmatch(name.strip()) and value.strip():
+            variables[name.strip()] = value.strip()
 
-
-def parse_registers(text: str) -> dict[str, str]:
     registers = {}
-    for line in text.splitlines():
+    for line in registers_text.splitlines():
         match = _REGISTER_LINE.match(line)
         if match:
             registers[match.group(1)] = match.group(2)
-    return registers
+    return (variables, registers) if registers else None

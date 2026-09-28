@@ -1,43 +1,37 @@
 campaign: test+
 
-test: NAME_K WORD NL PROGRAMS_K "[" programs "]" NL DATA_PROTECTION_K DATA_PROTECTION NL CONTROL_FLOW_K CONTROL_FLOW NL timeout? execution_repetitions? measure_overhead? measurement_repetitions? compiler_flags? injection? functions?
+test: _NAME_K WORD _NL _PROGRAMS_K "[" programs "]" _NL _DATA_PROTECTION_K DATA_PROTECTION _NL _CONTROL_FLOW_K CONTROL_FLOW _NL timeout_ms? execution_repetitions? measure_overhead? measurement_repetitions? compiler_flags? injection? functions?
 
-timeout: TIMEOUT_K POSITIVE_INT NL
-execution_repetitions: EXECUTION_REPETITIONS_K POSITIVE_INT NL
-measure_overhead: MEASURE_OVERHEAD_K BOOLEAN NL
-measurement_repetitions: MEASUREMENT_REPETITIONS_K POSITIVE_INT NL
-compiler_flags: COMPILER_FLAGS_K "[" compiler_flag_list? "]" NL
+timeout_ms: _TIMEOUT_K POSITIVE_INT _NL
+execution_repetitions: _EXECUTION_REPETITIONS_K POSITIVE_INT _NL
+measure_overhead: _MEASURE_OVERHEAD_K BOOLEAN _NL
+measurement_repetitions: _MEASUREMENT_REPETITIONS_K POSITIVE_INT _NL
+compiler_flags: _COMPILER_FLAGS_K "[" (COMPILER_FLAG ("," COMPILER_FLAG)*)? "]" _NL
 
-injection: INJECTION_K injection_mode NL
-?injection_mode: register_mode | memory_mode | global_mode
-register_mode: "register" (DATA_ONLY_K BOOLEAN)?
+injection: _INJECTION_K (register_mode | memory_mode | global_mode) _NL
+register_mode: "register" (_DATA_ONLY_K BOOLEAN)?
 memory_mode: "memory"
 global_mode: "global"
 
-functions: FUNCTIONS_K "[" function_list? "]" NL
-function_list: function_def ("," function_def)*
-function_def: WORD ("(" var_list ")")?
-var_list: var_def ("," var_def)*
+functions: _FUNCTIONS_K "[" (function_def ("," function_def)*)? "]" _NL
+function_def: WORD ("(" var_def ("," var_def)* ")")?
 var_def: GLOBAL_MARKER? WORD (":" (POSITIVE_INT | WORD))?
 
 programs: program ("," program)*
-program: PROGRAM_PATH | ESCAPED_STRING
+?program: PROGRAM_PATH | ESCAPED_STRING
 
-compiler_flag_list: COMPILER_FLAG ("," COMPILER_FLAG)*
-
-NAME_K:				"name:"
-PROGRAMS_K:			"programs:"
-DATA_PROTECTION_K:	"data_protection:"
-CONTROL_FLOW_K:		"control_flow_protection:"
-TIMEOUT_K:			"timeout_ms:"
-EXECUTION_REPETITIONS_K: "execution_repetitions:"
-MEASURE_OVERHEAD_K: "measure_overhead:"
-MEASUREMENT_REPETITIONS_K: "measurement_repetitions:"
-COMPILER_FLAGS_K:	"compiler_flags:"
-INJECTION_K:		"injection:"
-FUNCTIONS_K:		"functions:"
-DATA_ONLY_K:		"data_only:"
-TARGET_GLOBAL_K:	"target_global:"
+_NAME_K:				"name:"
+_PROGRAMS_K:			"programs:"
+_DATA_PROTECTION_K:	"data_protection:"
+_CONTROL_FLOW_K:		"control_flow_protection:"
+_TIMEOUT_K:			"timeout_ms:"
+_EXECUTION_REPETITIONS_K: "execution_repetitions:"
+_MEASURE_OVERHEAD_K: "measure_overhead:"
+_MEASUREMENT_REPETITIONS_K: "measurement_repetitions:"
+_COMPILER_FLAGS_K:	"compiler_flags:"
+_INJECTION_K:		"injection:"
+_FUNCTIONS_K:		"functions:"
+_DATA_ONLY_K:		"data_only:"
 GLOBAL_MARKER:		"@"
 BOOLEAN:			"true" | "false"
 
@@ -48,7 +42,7 @@ POSITIVE_INT: /[1-9][0-9]*/
 COMPILER_FLAG: /[^\s,\[\]]+/
 
 WORD: /[A-Za-z0-9_-]+/
-NL: /\r?\n/
+_NL: /\r?\n/
 
 %ignore /[ \t]+/
 %ignore /\r?\n[ \t]*(?=\r?\n)/

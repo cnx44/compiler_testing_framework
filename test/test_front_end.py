@@ -12,7 +12,6 @@ from src.front_end import (
     _QuitTui,
     _aspis_command_preview,
     _campaign_from_draft,
-    _configuration_text,
     _draft_errors,
     _draft_from_run,
     _draft_text,
@@ -21,9 +20,10 @@ from src.front_end import (
     main,
     _save_toolchain,
     _toolchain_errors,
-    _validate_config_text,
 )
+from src.config_builder import config_block
 from src.config_parser import (
+    parse_config_text,
     ControlFlowMode,
     DataProtectionMode,
     MemoryInjection,
@@ -190,13 +190,14 @@ class FrontEndSupportTest(unittest.TestCase):
         self.assertEqual(frame.call_count, 2)
 
     def test_editor_output_is_accepted_by_the_campaign_parser(self):
-        text = _configuration_text(
+        text = config_block(
             "demo", ["main.c"], "eddi", "cfcss", "5000", "1",
-            "-O2, -lm", "register data_only: true", "main(total:2)",
+            "register data_only: true", compiler_flags="-O2, -lm", functions="main(total:2)",
         )
 
         self.assertIn("programs: [\"main.c\"]", text)
-        self.assertIsNone(_validate_config_text(text))
+        run = parse_config_text(text).runs[0]
+        self.assertEqual(run.compiler_flags, ["-O2", "-lm"])
 
     def test_fit_lines_wraps_and_honours_height(self):
         self.assertEqual(_fit_lines(["abcdef", "gh"], 3, 2), ["abc", "def"])
@@ -211,11 +212,11 @@ class FrontEndSupportTest(unittest.TestCase):
                 name="batch",
                 programs=[str(source) for source in sources],
                 batch_directory=str(root),
-                data_mode="seddi",
-                control_mode="rasm",
+                data_mode=["seddi"],
+                control_mode=["rasm"],
                 repetitions="7",
                 compiler_flags="-O2, -lm",
-                injection="memory",
+                injection=["memory"],
                 functions="main(result)",
             )
 
@@ -387,7 +388,7 @@ class FrontEndSupportTest(unittest.TestCase):
             failed_runner.results = []
             failed_runner.log = ["RUN NAME: broken", "ERROR: compiler failed"]
             with (
-                patch.object(tui, "_file_picker", return_value=config),
+                patch.object(tui, "_file_picker", return_value=[config]),
                 patch.object(tui, "_frame"),
                 patch.object(tui, "_write"),
                 patch.object(tui, "_paged_text") as paged_text,

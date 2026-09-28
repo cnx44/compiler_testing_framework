@@ -1,53 +1,14 @@
-import gdb
+"""Stop at the return of TARGET_FUNC and dump the program state."""
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from gdb_utils import (
-    continue_to_function_return,
-    dump_requested_variables,
-    run_to_function,
-)
+from gdb_utils import continue_and_dump_state, run_script, start_at_function
 
 
 def main():
-    target_func = os.environ.get("TARGET_FUNC", "main")
-    vars_to_check_str = os.environ.get("VARS_TO_CHECK", "")
+    start_at_function(os.environ["TARGET_FUNC"])
+    continue_and_dump_state()
 
-    vars_to_check = [v.strip() for v in vars_to_check_str.split(",") if v.strip()]
 
-    run_to_function(target_func)
-    try:
-        continue_to_function_return(target_func)
-    except gdb.error as e:
-        print(f"Program received signal: {e}")
-
-    try:
-        gdb.execute('call (int)fflush(0)')
-    except gdb.error:
-        pass
-
-    # Extract snapshot data
-    gdb.execute('printf "@@ARGS@@\\n"')
-    try:
-        gdb.execute("info args")
-    except gdb.error:
-        pass
-
-    gdb.execute('printf "@@LOCALS@@\\n"')
-    try:
-        gdb.execute("info locals")
-    except gdb.error:
-        pass
-
-    dump_requested_variables(vars_to_check)
-
-    gdb.execute('printf "@@REGISTERS@@\\n"')
-    try:
-        gdb.execute("info registers")
-    except gdb.error:
-        pass
-
-    gdb.execute("quit")
-
-main()
+run_script(main)

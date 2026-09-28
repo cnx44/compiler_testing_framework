@@ -145,7 +145,7 @@ class TuiRegressionTests(unittest.TestCase):
         cases = [
             (lambda: self.tui._paged_text("Log", ["x" * 2000, "THE_END"], "Scroll"), "THE_END"),
             (lambda: self.tui._campaign_summary("campaign", [result]), "ASPIS CF"),
-            (lambda: self.tui._sdc_inspector("campaign", result, "latent_states", "LATENT"), "v29"),
+            (lambda: self.tui._state_inspector(result, "latent_states", "LATENT"), "v29"),
         ]
         for action, expected in cases:
             with self.subTest(expected=expected):

@@ -2,10 +2,21 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
-from src.campaign_runner import AspisRunner, CampaignRun, OracleRunner, ProgramRunner
+from src.campaign_runner import (
+    AspisRunner,
+    CampaignRun,
+    OracleRunner,
+    ProgramRunner,
+    absolute_flag_paths,
+    args_from_values_file,
+    classify_injections,
+    comparison_lines,
+    source_files,
+)
 from src.config_parser import (
     Campaign,
     ControlFlowMode,
@@ -14,792 +25,384 @@ from src.config_parser import (
     TargetFunction,
     TargetVariable,
 )
-from src.constants import DEFAULT_TIMEOUT_MS
 from src.env import Environment
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
 
+HANDLERS = str(Path(__file__).parents[1] / "src" / "aspis_handlers.c")
+DUMP = "@@ARGS@@\nn = 3\n@@LOCALS@@\nx = 7\nbuf = {1, 2}\n@@REGISTERS@@\nrax            0x7    7\n"
+
 
 class StubRunner(ProgramRunner):
-    def __init__(
-        self,
-        environment=None,
-        debugger=None,
-        timeout_ms=DEFAULT_TIMEOUT_MS,
-    ):
-        super().__init__(environment or Environment(), debugger, timeout_ms)
-        self.compiled_sources = []
-        self.compiler_flags = []
-
-    def _compile(self, sources, compiler_flags=None):
-        self.compiled_sources = sources
-        self.compiler_flags = compiler_flags or []
+    def _compile(self, sources, compiler_flags):
+        self.compiled = (sources, compiler_flags)
         Path(self.exe).write_bytes(b"binary")
 
 
+def completed(returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
 class ProgramRunnerTest(unittest.TestCase):
-
-
-    @patch("src.campaign_runner.subprocess.run")
-    def test_disabled_measurement_runs_once_and_still_collects_state(self, process):
-        process.return_value = subprocess.CompletedProcess([], 0, "ok", "")
-        runner = StubRunner()
-        runner._debug_snapshot = Mock(return_value={"variables": {}, "registers": {}})
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            try:
-                runner.compile([source.name])
-                results = runner.execute(measurement_repetitions=9, measure_overhead=False)
-            finally:
-                runner.cleanup()
-        process.assert_called_once()
-        runner._debug_snapshot.assert_called_once()
-        self.assertEqual(results["measurement_repetitions"], 1)
+    def setUp(self):
+        self.runner = StubRunner(Environment(), timeout_ms=1250)
+        self.addCleanup(self.runner.cleanup)
 
     def test_is_abstract(self):
         with self.assertRaises(TypeError):
             ProgramRunner(Environment())
 
-    def test_source_files_accepts_c_and_cpp_and_ignores_other_extensions(self):
-        with tempfile.TemporaryDirectory() as directory:
-            c_source = Path(directory) / "main.c"
-            cpp_source = Path(directory) / "helper.cpp"
-            note = Path(directory) / "note.rs"
-            for path in (c_source, cpp_source, note):
-                path.touch()
+    def test_compile_keeps_binary_until_cleanup(self):
+        self.runner.compile([Path("main.c")], ["-lm"])
+        self.assertEqual(self.runner.compiled, ([Path("main.c")], ["-lm"]))
+        self.assertEqual(self.runner.size, 6)
+        exe = Path(self.runner.exe)
+        self.assertTrue(exe.is_file())
+        self.runner.cleanup()
+        self.assertFalse(exe.exists())
 
-            sources = StubRunner()._source_files(
-                [str(c_source), str(note), str(cpp_source)]
-            )
+    def test_execute_requires_compiled_binary(self):
+        with self.assertRaisesRegex(RuntimeError, "compiled"):
+            self.runner.execute([], [])
 
-        self.assertEqual(sources, [c_source, cpp_source])
+    @patch("src.campaign_runner.time.perf_counter", side_effect=[0.0, 1.0, 2.0, 5.0])
+    @patch("src.campaign_runner.subprocess.run", return_value=completed(7, "out\n", "err"))
+    def test_execute_aggregates_timing_and_snapshots_each_function(self, run, _clock):
+        self.runner.compile([Path("main.c")])
+        snapshots = {"main": {"variables": {"x": "1"}, "registers": {"rax": "1"}},
+                     "work": {"variables": {"y": "2"}, "registers": {"rax": "2"}}}
+        self.runner.snapshot = Mock(side_effect=lambda args, f: snapshots[f.name])
+        functions = [TargetFunction("main"), TargetFunction("work")]
 
-    def test_source_files_rejects_missing_or_unsupported_sources(self):
-        runner = StubRunner()
-        with self.assertRaisesRegex(ValueError, "at least one"):
-            runner._source_files(["notes.rs"])
-        with self.assertRaisesRegex(FileNotFoundError, "missing.c"):
-            runner._source_files(["missing.c"])
+        results = self.runner.execute(["a"], functions, repetitions=2)
 
-    @patch("src.campaign_runner.time.perf_counter", side_effect=[10.0, 10.25])
-    @patch("src.campaign_runner.subprocess.run")
-    def test_run_compiles_executes_collects_snapshot_and_cleans_up(
-        self, run_process, _perf_counter
-    ):
-        run_process.return_value = subprocess.CompletedProcess(
-            args=[], returncode=7, stdout="out", stderr="err"
-        )
-        runner = StubRunner()
-        runner._debug_snapshot = Mock(
-            return_value={"variables": {"x": "1"}, "registers": {"rax": "0x1"}}
-        )
-
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            results = runner.run(
-                [source.name], ["one", "two"], compiler_flags=["-lm"]
-            )
-
+        self.assertEqual(run.call_args.args[0], [self.runner.exe, "a"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 1.25)
         self.assertEqual(results["returncode"], 7)
         self.assertEqual(results["stdout"], "out")
-        self.assertEqual(results["stderr"], "err")
-        self.assertEqual(results["variables"], {"x": "1"})
-        self.assertEqual(results["execution_time_seconds"], 0.25)
-        self.assertEqual(results["execution_time_samples_seconds"], [0.25])
-        self.assertEqual(results["execution_time_stddev_seconds"], 0.0)
-        self.assertEqual(results["execution_time_standard_error_seconds"], 0.0)
-        self.assertEqual(results["measurement_repetitions"], 1)
-        self.assertEqual(results["binary_size_bytes"], 6)
-        self.assertEqual(runner.size, 6)
-        self.assertEqual(runner.compiled_sources, [Path(source.name)])
-        self.assertEqual(runner.compiler_flags, ["-lm"])
-        runner._debug_snapshot.assert_called_once_with(
-            ["one", "two"], None, "main"
-        )
-        self.assertEqual(
-            results["snapshots"],
-            {
-                "main": {
-                    "variables": {"x": "1"},
-                    "registers": {"rax": "0x1"},
-                }
-            },
-        )
-        self.assertEqual(run_process.call_args.args[0][1:], ["one", "two"])
-        self.assertEqual(run_process.call_args.kwargs["timeout"], 5)
-        self.assertIsNone(runner._build_dir)
-        self.assertFalse(Path(runner.exe).exists())
-
-    @patch(
-        "src.campaign_runner.time.perf_counter",
-        side_effect=[0.0, 1.0, 2.0, 5.0],
-    )
-    @patch("src.campaign_runner.subprocess.run")
-    def test_execute_aggregates_repeated_timing_samples(
-        self, run_process, _perf_counter
-    ):
-        run_process.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok", stderr=""
-        )
-        runner = StubRunner()
-        runner._debug_snapshot = Mock(
-            return_value={"variables": {}, "registers": {"rax": "0x0"}}
-        )
-
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            runner.compile([source.name])
-            try:
-                results = runner.execute([], [], measurement_repetitions=2)
-            finally:
-                runner.cleanup()
-
         self.assertEqual(results["execution_time_samples_seconds"], [1.0, 3.0])
         self.assertEqual(results["execution_time_seconds"], 2.0)
         self.assertAlmostEqual(results["execution_time_stddev_seconds"], 2 ** 0.5)
-        self.assertAlmostEqual(
-            results["execution_time_standard_error_seconds"], 1.0
-        )
+        self.assertAlmostEqual(results["execution_time_standard_error_seconds"], 1.0)
         self.assertEqual(results["measurement_repetitions"], 2)
-        self.assertEqual(run_process.call_count, 2)
+        self.assertEqual(results["binary_size_bytes"], 6)
+        self.assertEqual(results["snapshots"], snapshots)
+        self.assertEqual(results["variables"], {"x": "1", "y": "2"})
 
-    @patch("src.campaign_runner.subprocess.run")
-    def test_execute_uses_configured_timeout(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = StubRunner(timeout_ms=1250)
-        runner._debug_snapshot = Mock(
-            return_value={"variables": {}, "registers": {}}
-        )
+    @patch("src.campaign_runner.subprocess.run",
+           side_effect=subprocess.TimeoutExpired("program", 1.25))
+    def test_execute_reports_configured_timeout(self, _run):
+        self.runner.compile([Path("main.c")])
+        with self.assertRaisesRegex(RuntimeError, "1250 ms"):
+            self.runner.execute([], [])
 
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            runner.compile([source.name])
-            try:
-                runner.execute()
-            finally:
-                runner.cleanup()
+    @patch("src.campaign_runner.shutil.which", return_value="/usr/bin/gdb")
+    @patch("src.campaign_runner.subprocess.run", return_value=completed(stdout="noise\n" + DUMP))
+    def test_snapshot_runs_gdb_script_with_requested_variables(self, run, _which):
+        self.runner.exe = "/tmp/program"
+        function = TargetFunction("work", [TargetVariable("buf", 2), TargetVariable("G", is_global=True)])
 
-        self.assertEqual(run_process.call_args.kwargs["timeout"], 1.25)
+        snapshot = self.runner.snapshot(["a"], function)
 
-    @patch("src.campaign_runner.subprocess.run")
-    def test_execute_reports_configured_timeout(self, run_process):
-        run_process.side_effect = subprocess.TimeoutExpired(["program"], 1.25)
-        runner = StubRunner(timeout_ms=1250)
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["gdb", "-nx", "--batch", "-q"])
+        self.assertTrue(command[5].endswith("snapshot_gdb.py"))
+        self.assertEqual(command[6:], ["--args", "/tmp/program", "a"])
+        self.assertEqual(run.call_args.kwargs["env"]["TARGET_FUNC"], "work")
+        self.assertEqual(run.call_args.kwargs["env"]["DUMP_VARS"], "buf:2,G")
+        self.assertEqual(snapshot, {"variables": {"n": "3", "x": "7", "buf": "{1, 2}"},
+                                    "registers": {"rax": "0x7"}})
 
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            runner.compile([source.name])
-            try:
-                with self.assertRaisesRegex(
-                    RuntimeError, "timed out after 1250 ms"
-                ):
-                    runner.execute()
-            finally:
-                runner.cleanup()
+    @patch("src.campaign_runner.shutil.which", return_value="/usr/bin/gdb")
+    @patch("src.campaign_runner.subprocess.run", return_value=completed(stdout="No symbol main"))
+    def test_snapshot_without_dump_fails(self, _run, _which):
+        with self.assertRaisesRegex(RuntimeError, "snapshot of main failed"):
+            self.runner.snapshot([], TargetFunction("main"))
 
-    def test_execute_rejects_non_positive_repetitions(self):
-        runner = StubRunner()
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            runner.compile([source.name])
-            try:
-                with self.assertRaisesRegex(ValueError, "positive integer"):
-                    runner.execute(measurement_repetitions=0)
-            finally:
-                runner.cleanup()
-
-    @patch("src.campaign_runner.subprocess.run")
-    def test_execute_collects_a_snapshot_for_each_target_function(
-        self, run_process
-    ):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = StubRunner()
-        runner._debug_snapshot = Mock(
-            side_effect=lambda _args, _variables, function: {
-                "variables": {function: "value"},
-                "registers": {"pc": function},
-            }
-        )
-
-        with tempfile.NamedTemporaryFile(suffix=".c") as source:
-            runner.compile([source.name])
-            try:
-                results = runner.execute(
-                    functions_to_check=["work", "helper", "work"]
-                )
-            finally:
-                runner.cleanup()
-
-        self.assertEqual(list(results["snapshots"]), ["work", "helper"])
-        self.assertEqual(
-            results["variables"], {"work": "value", "helper": "value"}
-        )
-        self.assertEqual(
-            runner._debug_snapshot.call_args_list,
-            [call([], None, "work"), call([], None, "helper")],
-        )
-
-    def test_parses_gdb_snapshot_formats(self):
-        runner = StubRunner()
-        output = """noise
-@@ARGS@@
-argc = 3
-(char **) argv = 0x1234
-invalid name = ignored
-@@LOCALS@@
-(int) total = 9
-@@REGISTERS@@
-rax 0x1
-rbx = 0x2
-"""
-
-        variables = {
-            **runner._parse_debug_variables(output, "@@ARGS@@", "@@LOCALS@@"),
-            **runner._parse_debug_variables(output, "@@LOCALS@@", "@@REGISTERS@@"),
-        }
-
-        self.assertEqual(
-            variables,
-            {"argc": "3", "argv": "0x1234", "total": "9"},
-        )
-        self.assertEqual(
-            runner._parse_debug_registers(output),
-            {"rax": "0x1", "rbx": "0x2"},
-        )
-
-
-
-    def test_debug_snapshot_collects_requested_global_variables(self):
-        runner = StubRunner()
-        runner._debuggers = Mock(return_value=["gdb"])
-        runner._run_debugger = Mock(
-            return_value=subprocess.CompletedProcess(
-                [],
-                0,
-                """@@ARGS@@
-No arguments.
-@@LOCALS@@
-No locals.
-@@GLOBALS@@
-sum = 2
-@@REGISTERS@@
-rax = 0x2
-""",
-                "",
-            )
-        )
-
-        snapshot = runner._debug_snapshot([], ["sum"])
-
-        self.assertEqual(snapshot["variables"], {"sum": "2"})
-        self.assertEqual(snapshot["registers"], {"rax": "0x2"})
-        runner._run_debugger.assert_called_once_with("gdb", "main", [], ["sum"])
-
-
-
-    @patch("src.campaign_runner.subprocess.run")
-    def test_gdb_command_prints_requested_global_variables(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = StubRunner()
-        runner.exe = "/tmp/program"
-        runner.src = "main.c"
-
-        runner._run_debugger("gdb", "work", [], ["sum"])
-
-        kwargs = run_process.call_args.kwargs
-        self.assertIn("env", kwargs)
-        self.assertEqual(kwargs["env"]["VARS_TO_CHECK"], "sum")
-        self.assertEqual(kwargs["env"]["TARGET_FUNC"], "work")
-        self.assertEqual(kwargs["timeout"], 5)
-
-
-
-    def test_debugger_rejects_invalid_variable_names(self):
-        with self.assertRaisesRegex(ValueError, "bad-name"):
-            StubRunner()._run_debugger("gdb", "main", [], ["bad-name"])
-
-    def test_debugger_rejects_invalid_function_names(self):
-        with self.assertRaisesRegex(ValueError, "bad-name"):
-            StubRunner()._run_debugger("gdb", "bad-name", [])
-
-    def test_debug_snapshot_reports_when_no_debugger_is_available(self):
-        runner = StubRunner()
-        runner._debuggers = Mock(return_value=[])
-        with self.assertRaisesRegex(RuntimeError, "gdb is not installed"):
-            runner._debug_snapshot([])
-
-    def test_debugger_command_rejects_unknown_debugger(self):
-        with self.assertRaisesRegex(ValueError, "Unsupported debugger"):
-            StubRunner()._run_debugger("unknown", "main", [])
-
-    @patch("src.campaign_runner.subprocess.run")
-    def test_debugger_command_accepts_custom_debugger_paths(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = StubRunner()
-        runner.exe = "/tmp/program"
-        runner.src = "main.c"
-        
-        runner._run_debugger("/opt/custom/gdb-multiarch", "main", [])
-        command = run_process.call_args.args[0]
-        self.assertEqual(command[0], "/opt/custom/gdb-multiarch")
+    @patch("src.campaign_runner.shutil.which", return_value=None)
+    def test_snapshot_requires_gdb(self, _which):
+        with self.assertRaisesRegex(RuntimeError, "not installed"):
+            self.runner.snapshot([], TargetFunction("main"))
 
 
 class OracleRunnerTest(unittest.TestCase):
-    @patch("src.campaign_runner.subprocess.run")
-    def test_compile_uses_compiler_from_environment_and_all_sources(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        runner = OracleRunner(Environment(vanilla_compiler="/tools/clang"))
-        runner.exe = "/tmp/output"
-        sources = [Path("main.c"), Path("helper.cpp")]
+    @patch("src.campaign_runner.subprocess.run", return_value=completed())
+    def test_compiles_all_sources_with_debug_info(self, run):
+        runner = OracleRunner(Environment(vanilla_compiler="/usr/bin/clang"))
+        runner.exe = "/tmp/program"
+        runner._compile([Path("main.c"), Path("helper.cpp")], ["-lm"])
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/clang", "-g", "-O0", "main.c",
+                                                 "helper.cpp", "-lm", "-o", "/tmp/program"])
 
-        runner._compile(sources, ["-Wall", "-lm"])
-
-        run_process.assert_called_once_with(
-            [
-                "/tools/clang",
-                "-g",
-                "-O0",
-                "main.c",
-                "helper.cpp",
-                "-Wall",
-                "-lm",
-                "-o",
-                "/tmp/output",
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-    def test_compile_requires_a_configured_compiler(self):
-        runner = OracleRunner(Environment(vanilla_compiler=""))
+    def test_requires_a_configured_compiler(self):
         with self.assertRaisesRegex(RuntimeError, "vanilla_compiler"):
-            runner._compile([Path("main.c")])
+            OracleRunner(Environment(vanilla_compiler=""))._compile([Path("main.c")], [])
 
-    @patch("src.campaign_runner.subprocess.run")
-    def test_compile_exposes_compiler_errors(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 1, "", "bad C")
-        runner = OracleRunner(Environment(vanilla_compiler="clang"))
-        runner.exe = "/tmp/output"
-        with self.assertRaisesRegex(RuntimeError, "bad C"):
-            runner._compile([Path("main.c")])
+    @patch("src.campaign_runner.subprocess.run", return_value=completed(1, "", "syntax error"))
+    def test_exposes_compiler_errors(self, _run):
+        with self.assertRaisesRegex(RuntimeError, "syntax error"):
+            OracleRunner(Environment())._compile([Path("main.c")], [])
 
 
 class AspisRunnerTest(unittest.TestCase):
-    def test_mode_arguments_cover_every_supported_combination(self):
-        environment = Environment()
-        data_flags = {
-            DataProtectionMode.EDDI: "--eddi",
-            DataProtectionMode.SEDDI: "--seddi",
-            DataProtectionMode.FDSC: "--fdsc",
-            DataProtectionMode.NONE: "--no-dup",
-        }
-        control_flags = {
-            ControlFlowMode.CFCSS: "--cfcss",
-            ControlFlowMode.RASM: "--rasm",
-            ControlFlowMode.INTER_RASM: "--inter-rasm",
-            ControlFlowMode.NONE: "--no-cfc",
-        }
-        for data_mode, data_flag in data_flags.items():
-            for control_mode, control_flag in control_flags.items():
-                with self.subTest(data=data_mode, control=control_mode):
-                    runner = AspisRunner(environment, data_mode, control_mode)
-                    self.assertEqual(
-                        runner._aspis_mode_args(),
-                        [data_flag, control_flag],
-                    )
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
+        self.script = self.directory / "aspis.sh"
+        self.script.touch()
 
-    @patch("src.campaign_runner.subprocess.run")
-    def test_compile_uses_all_environment_paths_modes_and_sources(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        with tempfile.TemporaryDirectory() as directory:
-            aspis_script = Path(directory) / "aspis.sh"
-            aspis_script.touch()
-            environment = Environment(
-                aspis_path=str(aspis_script),
-                vanilla_compiler="unused",
-                llvm_path="/tools/llvm",
-                aspis_flags=["--no-cleanup", "--coarse-grained"],
-            )
-            runner = AspisRunner(
-                environment,
-                DataProtectionMode.SEDDI,
-                ControlFlowMode.INTER_RASM,
-            )
-            runner.exe = str(Path(directory) / "program")
+    def compile(self, environment, *modes, flags=()):
+        runner = AspisRunner(environment, *modes)
+        runner.exe = str(self.directory / "program")
+        runner._compile([Path("main.c"), Path("helper.cpp")], list(flags))
 
-            runner._compile(
-                [Path("main.c"), Path("helper.cpp")], ["-Wall", "-lm"]
-            )
-
-        run_process.assert_called_once_with(
-            [
-                str(aspis_script.resolve()),
-                "-g",
-                "-o",
-                "program",
-                "--build-dir",
-                directory,
-                "--llvm-bin",
-                "/tools/llvm",
-                "--seddi",
-                "--inter-rasm",
-                "--no-cleanup",
-                "--coarse-grained",
-                str(Path("main.c").resolve()),
-                str(Path("helper.cpp").resolve()),
-                str(
-                    (Path(__file__).parents[1] / "src" / "aspis_handlers.c").resolve()
-                ),
-                "-Wall",
-                "-lm",
-            ],
-            capture_output=True,
-            text=True,
-            cwd=Path(directory),
+    @patch("src.campaign_runner.subprocess.run", return_value=completed())
+    def test_command_uses_environment_modes_sources_and_handlers(self, run):
+        environment = Environment(aspis_path=str(self.script), llvm_path="/llvm",
+                                  aspis_flags=["--no-cleanup"])
+        self.compile(environment, DataProtectionMode.SEDDI, ControlFlowMode.INTER_RASM,
+                     flags=["-Iinclude", "-lm"])
+        run.assert_called_once_with(
+            [str(self.script.resolve()), "-g", "-o", "program", "--build-dir", str(self.directory),
+             "--llvm-bin", "/llvm", "--seddi", "--inter-rasm", "--no-cleanup",
+             str(Path("main.c").resolve()), str(Path("helper.cpp").resolve()), HANDLERS,
+             f"-I{Path('include').resolve()}", "-lm"],
+            capture_output=True, text=True, cwd=self.directory,
         )
 
-    def test_compiler_paths_remain_relative_to_campaign_directory(self):
-        runner = AspisRunner(Environment())
+    @patch("src.campaign_runner.subprocess.run", return_value=completed())
+    def test_every_mode_has_an_aspis_flag(self, run):
+        environment = Environment(aspis_path=str(self.script))
+        for data in DataProtectionMode:
+            for control in ControlFlowMode:
+                self.compile(environment, data, control)
+                command = run.call_args.args[0]
+                self.assertNotIn("--llvm-bin", command)
+                self.assertEqual(len([arg for arg in command if arg.startswith("--")
+                                      and arg != "--build-dir"]), 2)
 
-        flags = runner._compiler_flags_for_build_dir([
-            "-Iinclude",
-            "-L",
-            "lib",
-            "-include",
-            "config.h",
-            "--sysroot=sysroot",
-            "-lm",
-        ])
-
-        self.assertEqual(
-            flags,
-            [
-                f"-I{Path('include').resolve()}",
-                "-L",
-                str(Path("lib").resolve()),
-                "-include",
-                str(Path("config.h").resolve()),
-                f"--sysroot={Path('sysroot').resolve()}",
-                "-lm",
-            ],
-        )
-
-    @patch("src.campaign_runner.subprocess.run")
-    def test_compile_omits_llvm_option_when_not_configured(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess([], 0, "", "")
-        with tempfile.TemporaryDirectory() as directory:
-            aspis_script = Path(directory) / "aspis.sh"
-            aspis_script.touch()
-            runner = AspisRunner(Environment(aspis_path=str(aspis_script)))
-            runner.exe = str(Path(directory) / "program")
-            runner._compile([Path("main.c")])
-
-        command = run_process.call_args.args[0]
-        self.assertNotIn("--llvm-bin", command)
-
-    def test_compile_requires_existing_aspis_script(self):
-        runner = AspisRunner(Environment(aspis_path="/missing/aspis.sh"))
+    def test_requires_existing_aspis_script(self):
         with self.assertRaisesRegex(RuntimeError, "aspis_path"):
-            runner._compile([Path("main.c")])
+            self.compile(Environment(aspis_path="/missing/aspis.sh"))
 
-    @patch("src.campaign_runner.subprocess.run")
-    def test_compile_exposes_stdout_and_stderr_on_failure(self, run_process):
-        run_process.return_value = subprocess.CompletedProcess(
-            [], 1, "ASPIS output", "ASPIS error"
-        )
-        with tempfile.NamedTemporaryFile(suffix=".sh") as script:
-            runner = AspisRunner(Environment(aspis_path=script.name))
-            runner.exe = "/tmp/program"
-            with self.assertRaisesRegex(
-                RuntimeError, "ASPIS output\nASPIS error"
-            ):
-                runner._compile([Path("main.c")])
+    @patch("src.campaign_runner.subprocess.run", return_value=completed(1, "ASPIS output", "ASPIS error"))
+    def test_exposes_stdout_and_stderr_on_failure(self, _run):
+        with self.assertRaisesRegex(RuntimeError, "ASPIS output\nASPIS error"):
+            self.compile(Environment(aspis_path=str(self.script)))
 
-
-class CampaignRunTest(unittest.TestCase):
-    def _campaign(
-        self,
-        programs=None,
-        compiler_flags=None,
-        variables=None,
-        execution_repetitions=1,
-        functions=None,
-        timeout_ms=DEFAULT_TIMEOUT_MS,
-    ):
-        target_funcs = [TargetFunction(f, [TargetVariable(v) for v in (variables or ["x"])]) for f in (functions or ["main"])]
-        return Campaign(
-            runs=[
-                RunnerTest(
-                    name="sample",
-                    programs=programs or ["main.c", "helper.cpp"],
-                    data_protection=DataProtectionMode.FDSC,
-                    control_flow_protection=ControlFlowMode.RASM,
-                    compiler_flags=compiler_flags or [],
-                    execution_repetitions=execution_repetitions,
-                    functions=target_funcs,
-                    timeout_ms=timeout_ms,
-                )
-            ]
-        )
-
-    @patch("src.campaign_runner.BaseInjector.create_for_target", return_value=[])
-    @patch("src.campaign_runner.AspisRunner")
-    @patch("src.campaign_runner.OracleRunner")
-    def test_runs_both_variants_with_same_programs_and_arguments(
-        self, oracle_class, aspis_class, create_injectors
-    ):
-        oracle_results = {
-            "returncode": 0,
-            "stdout": "ok",
-            "stderr": "",
-            "variables": {"x": "1"},
-            "execution_time_seconds": 1.0,
-            "binary_size_bytes": 100,
-        }
-        aspis_results = dict(oracle_results)
-        order = []
-        oracle_class.return_value.compile.side_effect = (
-            lambda programs, flags: order.append("oracle compile")
-        )
-        aspis_class.return_value.compile.side_effect = (
-            lambda programs, flags: order.append("aspis compile")
-        )
-        oracle_class.return_value.execute.side_effect = (
-            lambda args, variables, repetitions, functions, **kwargs: (
-                order.append("oracle execute") or oracle_results
-            )
-        )
-        aspis_class.return_value.execute.side_effect = (
-            lambda args, variables, repetitions, functions, **kwargs: (
-                order.append("aspis execute") or aspis_results
-            )
-        )
-        environment = Environment(aspis_path="/aspis", vanilla_compiler="/clang")
-
-        with tempfile.TemporaryDirectory() as directory:
-            log_path = Path(directory) / "campaign.log"
-            campaign_run = CampaignRun(
-                self._campaign(
-                    compiler_flags=["-lm"],
-                    execution_repetitions=5,
-                    timeout_ms=1250,
-                ),
-                environment,
-                str(log_path),
-                debugger="gdb",
-            )
-            log = campaign_run.run_campaign(["a", "b"])
-            written_log = log_path.read_text(encoding="utf-8")
-
-        oracle_class.assert_called_once_with(
-            environment, "gdb", timeout_ms=1250
-        )
-        oracle_class.return_value.compile.assert_called_once_with(
-            ["main.c", "helper.cpp"], ["-lm"]
-        )
-        oracle_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"], 5, ["main"], measure_overhead=True
-        )
-        aspis_class.assert_called_once_with(
-            environment,
-            data_protection=DataProtectionMode.FDSC,
-            control_flow_protection=ControlFlowMode.RASM,
-            debugger="gdb",
-            timeout_ms=1250,
-        )
-        aspis_class.return_value.compile.assert_called_once_with(
-            ["main.c", "helper.cpp"], ["-lm"]
-        )
-        aspis_class.return_value.execute.assert_called_once_with(
-            ["a", "b"], ["x"], 5, ["main"], measure_overhead=True
-        )
+    def test_compiler_paths_are_made_absolute(self):
         self.assertEqual(
-            order,
-            ["oracle compile", "oracle execute", "aspis compile", "aspis execute"],
+            absolute_flag_paths(["-Iinclude", "-L", "lib", "-include", "config.h",
+                                 "--sysroot=sysroot", "-lm", "-I"]),
+            [f"-I{Path('include').resolve()}", "-L", str(Path("lib").resolve()),
+             "-include", str(Path("config.h").resolve()),
+             f"--sysroot={Path('sysroot').resolve()}", "-lm", "-I"],
         )
-        self.assertIn("returncode: OK", log)
-        self.assertIn("Compiler flags: -lm", log)
-        self.assertIn("Execution repetitions: 5", log)
-        self.assertIn("Per-process timeout: 1250 ms", log)
-        self.assertIn("  OK x: oracle=1 aspis=1", log)
-        self.assertEqual(
-            campaign_run.results[0]["difference"]["binary_size_bytes"],
-            {"absolute": 0, "percent": 0.0},
-        )
-        self.assertEqual(campaign_run.results[0]["timeout_ms"], 1250)
-        self.assertEqual(written_log, "\n".join(log))
 
-    @patch("src.injector.RegisterInjector")
-    @patch("src.campaign_runner.AspisRunner")
-    @patch("src.campaign_runner.OracleRunner")
-    def test_runs_injector_and_logs_execution_results(
-        self, oracle_class, aspis_class, injector_class
-    ):
-        normal_results = {
-            "returncode": 0,
-            "stdout": "ok",
-            "stderr": "",
-            "variables": {},
-            "execution_time_seconds": 1.0,
-            "binary_size_bytes": 100,
-        }
-        oracle_class.return_value.execute.return_value = normal_results
-        aspis_class.return_value.execute.return_value = normal_results
-        aspis_class.return_value.exe = "/tmp/aspis-program"
-        execution_result = ExecutionResult(
-            TerminationEvent.RETURNED,
-            ExecutionState(stdout="injected run"),
-        )
-        injector_class.return_value.run.return_value = execution_result
 
+class HelpersTest(unittest.TestCase):
+    def test_source_files_require_existing_c_or_cpp(self):
         with tempfile.TemporaryDirectory() as directory:
-            campaign_run = CampaignRun(
-                self._campaign(
-                    functions=["work"],
-                    execution_repetitions=2,
-                    timeout_ms=1250,
-                ),
-                Environment(),
-                Path(directory) / "campaign.log",
-            )
-            log = campaign_run.run_campaign(["arg"])
+            c_file = Path(directory, "main.c")
+            cpp_file = Path(directory, "helper.cpp")
+            c_file.touch()
+            cpp_file.touch()
+            self.assertEqual(source_files([str(c_file), str(cpp_file)]), [c_file, cpp_file])
+            with self.assertRaisesRegex(ValueError, "Only C and C"):
+                source_files([str(c_file), "lib.rs"])
+            with self.assertRaises(FileNotFoundError):
+                source_files([str(Path(directory, "missing.c"))])
 
-        injector_class.assert_called_once_with(
-            campaign_run.environment,
-            "/tmp/aspis-program",
-            "main.c",
-            "work",
-            data_only=False,
-            debugger=None,
-            timeout_ms=1250,
-        )
-        self.assertEqual(
-            injector_class.return_value.run.call_args_list,
-            [call(["arg"]), call(["arg"])],
-        )
-        self.assertEqual(
-            log.count(f"Injection result: {execution_result}"),
-            2,
-        )
-
-    @patch("src.injector.RegisterInjector")
-    @patch("src.campaign_runner.AspisRunner")
-    @patch("src.campaign_runner.OracleRunner")
-    def test_runs_injector_concurrently(
-        self, oracle_class, aspis_class, injector_class
-    ):
-        normal_results = {
-            "returncode": 0,
-            "stdout": "ok",
-            "stderr": "",
-            "variables": {},
-            "execution_time_seconds": 1.0,
-            "binary_size_bytes": 100,
-        }
-        oracle_class.return_value.execute.return_value = normal_results
-        aspis_class.return_value.execute.return_value = normal_results
-        
-        # We'll run 4 injections and make them wait for each other at a barrier.
-        # If they aren't running concurrently, the barrier will timeout/deadlock,
-        # but since tests have timeouts, we use a threading.Barrier with a small timeout.
-        concurrency_level = 4
-        barrier = threading.Barrier(concurrency_level, timeout=5.0)
-        
-        def mock_run(args):
-            barrier.wait()
-            return ExecutionResult(TerminationEvent.RETURNED, ExecutionState(stdout="injected run"))
-
-        injector_class.return_value.run.side_effect = mock_run
-
+    def test_arguments_are_read_in_index_order(self):
         with tempfile.TemporaryDirectory() as directory:
-            campaign_run = CampaignRun(
-                self._campaign(functions=["work"], execution_repetitions=concurrency_level),
-                Environment(),
-                Path(directory) / "campaign.log",
-            )
-            campaign_run.run_campaign(["arg"])
-            
-        # If we reached here without a BrokenBarrierError or deadlock, concurrency works!
-        self.assertEqual(injector_class.return_value.run.call_count, concurrency_level)
-
-    @patch("src.campaign_runner.AspisRunner")
-    @patch("src.campaign_runner.OracleRunner")
-    def test_reads_arguments_from_values_file(self, oracle_class, aspis_class):
-        results = {
-            "returncode": 0,
-            "stdout": "",
-            "stderr": "",
-            "variables": {},
-            "execution_time_seconds": 1.0,
-            "binary_size_bytes": 100,
-        }
-        oracle_class.return_value.execute.return_value = results
-        aspis_class.return_value.execute.return_value = results
-
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "main.c"
-            source.touch()
-            source.with_suffix(".values").write_text(
-                "args[2] = second\nargs[1] = first\nx = ignored\n",
-                encoding="utf-8",
-            )
-            log_path = Path(directory) / "campaign.log"
-            campaign_run = CampaignRun(
-                self._campaign(programs=[str(source)]),
-                Environment(),
-                str(log_path),
-            )
-            campaign_run.run_campaign()
-
-        oracle_class.return_value.compile.assert_called_once_with([str(source)], [])
-        oracle_class.return_value.execute.assert_called_once_with(
-            ["first", "second"], ["x"], 1, ["main"], measure_overhead=True
-        )
-
-    def test_skips_run_without_supported_entry_source(self):
-        with tempfile.TemporaryDirectory() as directory:
-            runner = CampaignRun(
-                self._campaign(programs=["README.txt"]),
-                Environment(),
-                str(Path(directory) / "campaign.log"),
-            )
-            log = runner.run_campaign()
-        self.assertTrue(any("ERROR: CONFIGURATION" in line and "No C or C++ source file" in line for line in log))
-
-    @patch("src.campaign_runner.OracleRunner")
-    def test_records_runner_errors_and_continues(self, oracle_class):
-        oracle_class.return_value.compile.side_effect = RuntimeError("compiler down")
-        with tempfile.TemporaryDirectory() as directory:
-            runner = CampaignRun(
-                self._campaign(),
-                Environment(),
-                str(Path(directory) / "campaign.log"),
-            )
-            log = runner.run_campaign([])
-        self.assertIn("ERROR: compiler down", log)
+            source = Path(directory, "main.c")
+            self.assertEqual(args_from_values_file(source), [])
+            source.with_suffix(".values").write_text("args[2] = second\nargs[1] = first\nx = 1\n")
+            self.assertEqual(args_from_values_file(source), ["first", "second"])
 
     def test_comparison_marks_differences_and_missing_variables(self):
-        runner = CampaignRun(self._campaign(), Environment())
-        lines = runner._comparison_lines(
-            {
-                "returncode": 0,
-                "stdout": "expected",
-                "stderr": "",
-                "variables": {"x": "1"},
-                "execution_time_seconds": 1.0,
-                "binary_size_bytes": 100,
-            },
-            {
-                "returncode": 1,
-                "stdout": "actual",
-                "stderr": "",
-                "variables": {},
-                "execution_time_seconds": 1.5,
-                "binary_size_bytes": 125,
-            },
-            ["x"],
-        )
+        oracle = {"returncode": 0, "stdout": "expected", "stderr": "", "variables": {"x": "1"},
+                  "execution_time_seconds": 1.0, "binary_size_bytes": 100,
+                  "measurement_repetitions": 1, "execution_time_standard_error_seconds": 0.0}
+        aspis = {**oracle, "returncode": 1, "stdout": "actual", "variables": {},
+                 "execution_time_seconds": 1.5, "binary_size_bytes": 125}
+        differences = {"execution_time_seconds": {"absolute": 0.5, "percent": 50.0},
+                       "binary_size_bytes": {"absolute": 25, "percent": 25.0}}
+        lines = comparison_lines(oracle, aspis, differences, [TargetFunction("main", [TargetVariable("x")])])
         self.assertIn("returncode: DIFF", lines)
         self.assertIn("stdout: DIFF", lines)
         self.assertIn("stderr: OK", lines)
-        self.assertIn(
-            "  binary_size_bytes: oracle=100 bytes, aspis=125 bytes, difference=+25 bytes (+25.00%)",
-            lines,
-        )
+        self.assertIn("  binary_size_bytes: oracle=100 bytes, aspis=125 bytes, difference=+25 bytes (+25.00%)", lines)
         self.assertIn("  DIFF x: oracle=1 aspis=<missing>", lines)
+
+    def test_classification(self):
+        function = TargetFunction("main", [TargetVariable("x"), TargetVariable("p")])
+        oracle = {"stdout": "ok", "stderr": "",
+                  "snapshots": {"main": {"variables": {"x": "1", "p": "0x10"}}}}
+
+        def returned(stdout="ok", error="", **variables):
+            state = ExecutionState(stdout=stdout, variables={"x": "1", "p": "0x10", **variables}, error=error)
+            return ExecutionResult(TerminationEvent.RETURNED, state), function
+
+        injections = [
+            returned(),                        # identical
+            returned(p="0x20"),                # another address is not a corruption
+            returned(x="2"),                   # latent
+            returned(x="2", error="no dump"),  # state unknown: not latent
+            returned(stdout="bad"),            # sdc
+            (ExecutionResult(TerminationEvent.CRASHED, ExecutionState()), function),
+            (ExecutionResult(TerminationEvent.TIMEOUT, ExecutionState()), function),
+            (ExecutionResult(TerminationEvent.ASPIS_DATA, ExecutionState()), function),
+            (ExecutionResult(TerminationEvent.ASPIS_CF, ExecutionState()), function),
+        ]
+        summary = classify_injections(injections, oracle)
+        counts = {k: v for k, v in summary.items() if not k.endswith("_states")}
+        self.assertEqual(counts, {"total": 9, "masked": 3, "sdc": 1, "latent": 1, "timeout": 1,
+                                  "crash": 1, "aspis_data": 1, "aspis_cf": 1})
+        self.assertEqual(summary["sdc_states"][0]["stdout"], "bad")
+        self.assertEqual(summary["latent_states"][0]["function"], "main")
+
+
+class CampaignRunTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.source = self.root / "main.c"
+        self.source.touch()
+        self.case = RunnerTest("test", [str(self.source)], DataProtectionMode.FDSC,
+                               ControlFlowMode.RASM, timeout_ms=1250,
+                               functions=[TargetFunction("main", [TargetVariable("x")])])
+        self.results = {"returncode": 0, "stdout": "ok", "stderr": "", "variables": {"x": "1"},
+                        "snapshots": {"main": {"variables": {"x": "1"}}},
+                        "execution_time_seconds": 1.0, "binary_size_bytes": 100,
+                        "measurement_repetitions": 1, "execution_time_standard_error_seconds": 0.0}
+        self.injectors = []
+        for target, value in (("OracleRunner", None), ("AspisRunner", None),
+                              ("create_injectors", self.create_injectors)):
+            patcher = patch(f"src.campaign_runner.{target}",
+                            side_effect=value or (lambda *a, **k: self.mock_runner()))
+            self.addCleanup(patcher.stop)
+            setattr(self, target, patcher.start())
+
+    def create_injectors(self, *args, **kwargs):
+        return self.injectors.pop(0) if self.injectors else []
+
+    def mock_runner(self):
+        runner = Mock(exe="/tmp/aspis-program")
+        runner.execute.return_value = self.results
+        return runner
+
+    def injector(self, *results):
+        injector = Mock()
+        injector.run.side_effect = list(results)
+        return injector
+
+    def run_campaign(self, runs, args=None):
+        campaign_run = CampaignRun(Campaign(runs), Environment(), self.root / "campaign.log")
+        campaign_run.run_campaign(args)
+        return campaign_run
+
+    def test_builds_both_variants_and_writes_log_and_summary(self):
+        run = replace(self.case, compiler_flags=["-lm"], execution_repetitions=5)
+        campaign_run = self.run_campaign([run], ["a", "b"])
+
+        self.OracleRunner.assert_called_once_with(campaign_run.environment, 1250)
+        self.AspisRunner.assert_called_once_with(campaign_run.environment, DataProtectionMode.FDSC,
+                                                 ControlFlowMode.RASM, 1250)
+        self.create_injectors.assert_called_once()
+        self.assertEqual(self.create_injectors.call_args.args[5:], (["a", "b"], 1250))
+        log = campaign_run.log
+        for line in ("Compiler flags: -lm", "Execution repetitions: 5", "Per-process timeout: 1250 ms",
+                     "Args: a b", "returncode: OK", "  OK x: oracle=1 aspis=1"):
+            self.assertIn(line, log)
+        self.assertEqual((self.root / "campaign.log").read_text(), "\n".join(log))
+        self.assertEqual(campaign_run.results[0]["difference"]["binary_size_bytes"],
+                         {"absolute": 0, "percent": 0.0})
+        self.assertTrue(campaign_run.summary_path.is_file())
+
+    def test_measurement_repetitions(self):
+        runner = self.mock_runner()
+        self.OracleRunner.side_effect = None
+        self.OracleRunner.return_value = runner
+        self.run_campaign([replace(self.case, execution_repetitions=2, measurement_repetitions=7)])
+        self.run_campaign([replace(self.case, execution_repetitions=3)])
+        self.run_campaign([replace(self.case, execution_repetitions=3, measure_overhead=False)])
+        self.assertEqual([c.args[2] for c in runner.execute.call_args_list], [7, 3, 1])
+
+    def test_identical_builds_are_shared(self):
+        runs = [self.case, replace(self.case, name="reps", execution_repetitions=2),
+                replace(self.case, name="timeout", timeout_ms=100),
+                replace(self.case, name="modes", data_protection=DataProtectionMode.EDDI),
+                replace(self.case, name="reuse")]
+        campaign_run = self.run_campaign(runs)
+        self.assertEqual(len(campaign_run.results), 5)
+        self.assertEqual(self.OracleRunner.call_count, 3)
+        self.assertEqual(self.AspisRunner.call_count, 4)
+
+    def test_failed_snapshot_releases_runner_and_does_not_poison_cache(self):
+        failed, success = self.mock_runner(), self.mock_runner()
+        failed.execute.side_effect = RuntimeError("snapshot failure")
+        self.OracleRunner.side_effect = [failed, success]
+        campaign_run = self.run_campaign([self.case, replace(self.case, name="retry")])
+        failed.cleanup.assert_called_once()
+        success.cleanup.assert_called_once()
+        self.assertEqual([r["name"] for r in campaign_run.results], ["retry"])
+        self.assertIn("ERROR: snapshot failure", campaign_run.log)
+
+    def test_configuration_errors_do_not_abort_other_tests(self):
+        other = self.root / "other.c"
+        other.touch()
+        self.source.with_suffix(".values").write_bytes(b"\xff")
+        runs = [self.case, replace(self.case, name="rust", programs=["main.rs"]),
+                replace(self.case, name="bad", functions=[TargetFunction("1st")]),
+                replace(self.case, name="second", programs=[str(other)])]
+        campaign_run = self.run_campaign(runs)
+        self.assertEqual([r["name"] for r in campaign_run.results], ["second"])
+        errors = [line for line in campaign_run.log if line.startswith("ERROR: CONFIGURATION")]
+        self.assertEqual(len(errors), 3)
+        self.assertIn("Unable to read arguments", errors[0])
+
+    def test_classification_uses_each_functions_own_snapshot(self):
+        functions = [TargetFunction(name, [TargetVariable("x")]) for name in ("first", "second")]
+        self.results["snapshots"] = {"first": {"variables": {"x": "1"}},
+                                     "second": {"variables": {"x": "2"}}}
+        for value in ("1", "2"):
+            state = ExecutionState(stdout="ok", variables={"x": value})
+            self.injectors.append([self.injector(ExecutionResult(TerminationEvent.RETURNED, state))])
+        campaign_run = self.run_campaign([replace(self.case, functions=functions)])
+        self.assertEqual(campaign_run.results[0]["injections"]["masked"], 2)
+
+    def test_debugger_failures_are_retried(self):
+        failure = ExecutionResult(TerminationEvent.INTERNAL_ERROR, ExecutionState(error="startup failed"))
+        success = ExecutionResult(TerminationEvent.RETURNED, ExecutionState(stdout="ok", variables={"x": "1"}))
+        self.injectors.append([self.injector(failure, RuntimeError("profiling"), success, success)])
+        campaign_run = self.run_campaign([replace(self.case, execution_repetitions=2)])
+        self.assertEqual(campaign_run.results[0]["injections"]["masked"], 2)
+        self.assertIn("Recovered 2 transient injection error(s).", campaign_run.log)
+
+    def test_incomplete_injections_fail_the_test(self):
+        failure = ExecutionResult(TerminationEvent.INTERNAL_ERROR, ExecutionState(error="startup failed"))
+        injector = Mock()
+        injector.run.return_value = failure
+        self.injectors.append([injector])
+        campaign_run = self.run_campaign([self.case])
+        self.assertEqual(injector.run.call_count, 2)
+        self.assertEqual(campaign_run.results, [])
+        self.assertTrue(any("Injection campaign incomplete" in line for line in campaign_run.log))
+
+    def test_injections_run_concurrently(self):
+        barrier = threading.Barrier(4, timeout=5)
+
+        def run():
+            barrier.wait()
+            return ExecutionResult(TerminationEvent.RETURNED, ExecutionState(stdout="ok", variables={"x": "1"}))
+
+        injector = Mock()
+        injector.run.side_effect = run
+        self.injectors.append([injector])
+        campaign_run = self.run_campaign([replace(self.case, execution_repetitions=4)])
+        self.assertEqual(campaign_run.results[0]["injections"]["masked"], 4)
 
 
 if __name__ == "__main__":

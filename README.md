@@ -74,13 +74,13 @@ Il flusso dei dati è il seguente:
                 +---------------------+  /          \                                    |
                 |    Snapshot GDB     |<+            v                                   |
                 +---------------------+   +----------------------------------+           |
-                         |                |  BaseInjector.create_for_target  |           |
+                         |                |        create_injectors()        |           |
                          |                +----------------------------------+           |
                          |                      /          |          \                  |
                          |                     /           |           \                 |
                          |                    v            v            v                |
                          |   +------------------+ +----------------+ +----------------+  |
-                         |   | RegisterInjector | | MemoryInjector | | GlobalInjector |  |
+                         |   | inject_registers | |  inject_memory | | inject_globals |  |
                          |   +------------------+ +----------------+ +----------------+  |
                          |             \                   |                  /          |
                          |              \                  v                 /           |
@@ -115,9 +115,9 @@ Il flusso dei dati è il seguente:
 | `src/config_parser.py` | Parsing della grammatica e conversione in dataclass immutabili. Risolve anche i percorsi dei sorgenti. |
 | `src/config_builder.py` | Serializzazione canonica delle dataclass nel formato `.cfg`; usata dall'editor. |
 | `src/env.py` | Modello della toolchain esterna: ASPIS, LLVM, compiler e debugger. |
-| `src/constants.py` | Valori predefiniti condivisi, attualmente il timeout di `5000 ms`. |
 | `src/campaign_runner.py` | Compilazione Oracle/ASPIS, esecuzioni normali, snapshot, misure, orchestrazione delle injection e scrittura dei risultati. |
-| `src/injector.py` | Factory e classi degli injector, profiling, avvio debugger, timeout e classificazione dell'evento. |
+| `src/injector.py` | Factory `create_injectors()`, classe `Injector` (profiling, avvio GDB, timeout) e classificazione dell'evento. |
+| `src/debug_output.py` | Parsing del dump `@@ARGS@@`/`@@LOCALS@@`/`@@REGISTERS@@` stampato dagli script GDB. |
 | `src/models.py` | `ExecutionState`, `ExecutionResult` e `TerminationEvent`. |
 | `src/gdb_scripts/` | Script caricati dentro GDB per profiling, snapshot e bit flip. |
 | `src/aspis_handlers.c` | Handler collegati automaticamente al binario protetto per rendere riconoscibili le detection ASPIS. |
@@ -163,7 +163,7 @@ questi passaggi.
    dimensione dei due eseguibili.
 7. Avvia una nuova esecuzione sotto debugger per ogni funzione configurata e
    acquisisce argomenti, locali, globali richieste e registri vicino al ritorno.
-8. Crea gli injector tramite `BaseInjector.create_for_target()`.
+8. Crea gli injector tramite `create_injectors()`.
 9. Esegue il profiling dinamico necessario all'injection.
 10. Lancia le injection concorrenti e raccoglie un `ExecutionResult` per ognuna.
 11. Classifica i risultati rispetto allo stato Oracle.
@@ -240,16 +240,19 @@ richiesta, lo script:
 2. usa le line table DWARF per trovare la linea sorgente più alta appartenente
    alla funzione;
 3. continua fino a quella linea mentre il frame è ancora attivo;
-4. scarica sezioni marcate `@@ARGS@@`, `@@LOCALS@@`, `@@GLOBALS@@` e
-   `@@REGISTERS@@`.
+4. scarica sezioni marcate `@@ARGS@@`, `@@LOCALS@@` (seguite dalle variabili
+   configurate per quella funzione) e `@@REGISTERS@@`.
 
 Questo consente di leggere locali e argomenti prima che il frame venga distrutto.
 Con `main` il punto osservato è quindi il ritorno di `main`. Se la funzione non 
 viene chiamata, è stata eliminata/inlined o non dispone di informazioni di debug 
 sufficienti, lo snapshot può fallire.
 
-Su Linux e macOS viene usato GDB. Quando nessun debugger è imposto
-esplicitamente (il default), viene risolto l'eseguibile `gdb` nel `PATH` di sistema.
+Viene usato GDB (`Environment.gdb_executable`, default `gdb` nel `PATH`),
+sempre con `-nx`: un `.gdbinit` personale (per esempio pwndbg o
+`set print pretty`) non deve alterare l'output che viene analizzato. Gli script
+d'injection redirigono `stdout` e `stderr` del programma su file separati,
+mantenendo gli argomenti passati con `--args`.
 
 ## Installazione
 
@@ -321,7 +324,6 @@ sviluppo è:
   "aspis_path": "/mnt/misto/projects/ASPIS/aspis.sh",
   "llvm_path": "/home/cnx/llvm-21.1.8/build/bin",
   "vanilla_compiler": "clang",
-  "debugger": "gdb",
   "aspis_flags": []
 }
 ```
@@ -341,7 +343,6 @@ python -m src.front_end \
   --aspis-path ../ASPIS/aspis.sh \
   --llvm-path ~/llvm-21.1.8/build/bin \
   --compiler clang \
-  --debugger gdb \
   --aspis-flags '--no-cleanup --coarse-grained'
 ```
 
@@ -352,7 +353,6 @@ Le opzioni hanno equivalenti tramite variabili d'ambiente:
 | `--aspis-path` | `ASPIS_PATH` |
 | `--llvm-path` | `ASPIS_LLVM_PATH` |
 | `--compiler` | `ASPIS_COMPILER` |
-| `--debugger` | `ASPIS_DEBUGGER` |
 | `--aspis-flags` | `ASPIS_FLAGS` |
 
 La precedenza è: argomenti CLI o variabili d'ambiente, configurazione salvata,
@@ -524,9 +524,10 @@ sostituisce i `.values` per tutti i test della campagna.
 
 ## Modalità di fault injection
 
-`BaseInjector` definisce il ciclo comune e nasconde a `CampaignRun` i dettagli
-dei singoli meccanismi. La factory `create_for_target()` riceve la configurazione
-tipizzata e restituisce gli injector concreti necessari.
+Un `Injector` esegue uno script GDB (`inject_registers.py`, `inject_memory.py`
+o `inject_globals.py`) con le opzioni passate come variabili d'ambiente. La
+factory `create_injectors()` riceve la configurazione tipizzata e restituisce
+gli injector necessari.
 
 ### Profiling comune
 
@@ -573,10 +574,10 @@ injection: memory
 functions: [work(buffer:128)]
 ```
 
-La factory crea un `MemoryInjector` per ogni variabile configurata nella
-funzione. L'injector tenta di determinare indirizzo, tipo e dimensione tramite
-DWARF, con fallback sui registri ABI per alcuni parametri. Inverte quindi un bit
-casuale in una word di quattro byte dentro i limiti calcolati.
+La factory crea un injector per ogni variabile locale (senza `@`) configurata
+nella funzione. Lo script determina indirizzo, tipo e dimensione tramite DWARF,
+con fallback sui registri ABI per alcuni parametri, e inverte un bit casuale
+all'interno dei byte calcolati.
 
 Se la funzione non specifica variabili, viene creato un injector generico che
 usa un intervallo sicuro dello stack come fallback. L'inferenza dinamica dipende
@@ -599,29 +600,24 @@ functions: [main]
 ```
 
 La sintassi `@` indica al framework che la variabile specificata è globale. 
-Nel primo caso, la factory crea un `GlobalInjector` per ogni variabile globale (preceduta da `@`) configurata nella funzione.
+Nel primo caso, la factory crea un injector per ogni variabile globale (preceduta da `@`) configurata nella funzione.
 Nel secondo caso (nessuna variabile globale fornita esplicitamente), lo script analizza `info variables`, limita i candidati al
 sorgente di ingresso e ne sceglie uno casualmente. Dopo alcuni passi nella
 funzione, inverte un bit nei primi otto byte della globale scelta.
 
 ### Numero totale delle injection
 
-Per `register` e `global`, in assenza di errori:
+Ogni funzione produce un injector per `register`, uno per variabile locale con
+`memory` e uno per variabile `@globale` con `global` (almeno uno comunque):
 
 ```text
-totale = execution_repetitions × numero_di_funzioni
-```
-
-Per `memory` con variabili configurate:
-
-```text
-totale = execution_repetitions × somma_delle_variabili_di_ogni_funzione
+totale = execution_repetitions × numero_di_injector
 ```
 
 Le ripetizioni dello stesso injector vengono avviate in modo concorrente tramite un
-`ThreadPoolExecutor`. Un'eccezione dell'injector viene registrata come
-`Injection error` e non entra nel totale classificato; il totale JSON è quindi
-il numero di `ExecutionResult` effettivamente raccolti.
+`ThreadPoolExecutor`. I tentativi falliti (errore del debugger, `INTERNAL_ERROR`)
+vengono ripetuti fino a `execution_repetitions` volte in più; se il campione
+resta incompleto il test fallisce con `Injection campaign incomplete`.
 
 ## Uso della TUI
 
@@ -844,7 +840,8 @@ Per ogni variante vengono registrati:
 - `execution_time_standard_error_seconds`: errore standard della media;
 - `measurement_repetitions`: numero di esecuzioni per la variante;
 - `binary_size_bytes`: dimensione esatta dell'eseguibile su disco;
-- `variables`, `registers` e `snapshots`: stato acquisito dal debugger.
+- `snapshots`: per ogni funzione, `variables` e `registers` acquisiti dal
+  debugger; `variables` riunisce le variabili di tutte le funzioni.
 
 `difference` contiene, per tempo e dimensione:
 
@@ -883,14 +880,14 @@ Prima viene determinato l'evento del processo:
 | `CRASHED` | GDB riporta un segnale, per esempio SIGSEGV o SIGILL. | Crash. |
 | `ASPIS_DATA` | È comparsa la stringa dell'handler di corruzione dati. | ASPIS Data. |
 | `ASPIS_CF` | È comparsa la stringa dell'handler di control-flow mismatch. | ASPIS CF. |
-| `INTERNAL_ERROR` | Lo script debugger ha prodotto un errore fatale o non ha estratto lo stato. | Attualmente contato come Crash. |
+| `INTERNAL_ERROR` | Lo script GDB ha prodotto un errore fatale. | Non conteggiato: il tentativo viene ripetuto. |
 
 Un risultato `RETURNED` viene poi classificato così, in questo ordine:
 
 | Risultato | Condizione |
 |---|---|
 | `SDC` | `stdout` o `stderr` differiscono dall'Oracle. |
-| `Latent` | L'output coincide, ma almeno una variabile configurata differisce. |
+| `Latent` | L'output coincide, ma almeno una variabile configurata differisce (solo se lo stato al ritorno è stato acquisito). |
 | `Masked` | Output e variabili configurate coincidono con l'Oracle. |
 
 SDC significa *Silent Data Corruption*: il fault non è stato segnalato da ASPIS
@@ -921,8 +918,7 @@ osservato.
       "measurement_repetitions": 2,
       "binary_size_bytes": 18432,
       "variables": {"result": "42"},
-      "registers": {"rax": "0x2a"},
-      "snapshots": {}
+      "snapshots": {"main": {"variables": {"result": "42"}, "registers": {"rax": "0x2a"}}}
     },
     "aspis": {},
     "difference": {
@@ -966,13 +962,6 @@ durata massima teorica della campagna può quindi essere molto maggiore di
 Un timeout durante un'esecuzione normale interrompe quel test e viene riportato
 come `ERROR` nel log. Un timeout durante un'injection produce invece un
 `TerminationEvent.TIMEOUT` e viene conteggiato separatamente dai crash.
-
-Gli script legacy sotto `src/gdb_scripts/misc/` non leggono il `.cfg`; usano la
-variabile d'ambiente `TIMEOUT_MS`, sempre con default `5000`:
-
-```shell
-TIMEOUT_MS=10000 src/gdb_scripts/misc/run_campaign.sh ./program reg
-```
 
 ## Errori comuni
 
@@ -1054,15 +1043,15 @@ python -m unittest \
   test.test_front_end -v
 ```
 
-I test in `test/test_dynamic_inference.py` compilano piccoli programmi C e
+I test in `test/test_gdb_integration.py` compilano piccoli programmi C e
 avviano GDB. Possono fallire in ambienti che vietano `ptrace` o l'esecuzione
 dell'inferior, anche quando gli unit test sono verdi.
 
 ## Limiti attuali
 
-- Il parser e la TUI accettano `.rs`, ma `ProgramRunner` compila soltanto `.c` e
-  `.cpp`. Un test composto esclusivamente da Rust non è attualmente eseguibile;
-  anche il batch va quindi usato solo con C/C++.
+- Il parser e la TUI accettano `.rs` (per l'analisi dei simboli), ma il runner
+  compila soltanto `.c` e `.cpp`: un test con sorgenti Rust fallisce con un
+  errore di configurazione.
 - La selezione batch non è ricorsiva e tratta ogni file come programma autonomo.
 - La scelta del punto di injection è casuale e il seed non viene salvato: una
   singola injection non è riproducibile bit per bit.
@@ -1070,7 +1059,6 @@ dell'inferior, anche quando gli unit test sono verdi.
   alternanza, quindi risentono del rumore di sistema.
 - La classificazione Latent confronta solo le variabili indicate nella
   configurazione; i registri sono informativi.
-- `INTERNAL_ERROR` è attualmente aggregato ai crash nel riepilogo.
 - Un timeout di compilazione non è configurabile.
 - L'inferenza memory/global dipende da DWARF, ABI e capacità del debugger; non
   tutte le architetture o forme di dato sono equivalenti.
@@ -1078,8 +1066,6 @@ dell'inferior, anche quando gli unit test sono verdi.
   funzioni con ritorni anticipati o line table insolite possono non raggiungerlo.
 - Poiché `aspis_handlers.c` viene collegato automaticamente, un programma che
   definisce gli stessi handler può produrre simboli duplicati al link.
-- Gli script in `src/gdb_scripts/misc/` sono una pipeline legacy separata dalla
-  TUI e dalla grammatica principale.
 
 ## Come estendere il progetto
 
@@ -1091,10 +1077,9 @@ La modifica tipica attraversa questi livelli:
 2. estendere `grammar.lark` e `RunnerConfigTransformer`;
 3. aggiornare `config_builder.py` per il round-trip;
 4. esporre la scelta nell'editor della TUI;
-5. creare una sottoclasse di `BaseInjector` con `setup` e `gdb_script`;
-6. aggiungere il caso alla factory `BaseInjector.create_for_target()`;
-7. implementare lo script GDB corrispondente;
-8. aggiungere test di parser, factory, comando debugger e classificazione.
+5. implementare lo script GDB corrispondente (usando `gdb_utils`);
+6. aggiungere il caso alla factory `create_injectors()` con le sue opzioni;
+7. aggiungere test di parser, factory, comando debugger e classificazione.
 
 `CampaignRun` non dovrebbe conoscere i dettagli concreti dell'injector: deve
 continuare a chiedere alla factory gli oggetti necessari e invocare soltanto
@@ -1105,7 +1090,7 @@ l'interfaccia comune.
 Una nuova metrica richiede normalmente:
 
 1. raccolta in `ProgramRunner.execute()` o `compile()`;
-2. confronto in `_measurement_differences()`;
+2. confronto in `measurement_differences()`;
 3. output nel log;
 4. rendering nel riepilogo TUI;
 5. test sul valore assoluto, percentuale e caso Oracle uguale a zero.

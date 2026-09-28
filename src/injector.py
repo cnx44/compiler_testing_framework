@@ -1,408 +1,198 @@
 import os
-import shutil
 import subprocess
 import tempfile
 import threading
-from abc import ABC, abstractmethod
 from pathlib import Path
 
 from src import debug_output
-from src.constants import DEFAULT_TIMEOUT_MS
 from src.config_parser import (
     GlobalInjection,
+    Injection,
     MemoryInjection,
     RegisterInjection,
     TargetFunction,
 )
+from src.config_parser import DEFAULT_TIMEOUT_MS
 from src.models import ExecutionResult, ExecutionState, TerminationEvent
-from src.env import Environment
 
-# Exit code reported for a debugger run killed by our timeout (as timeout(1) does).
-TIMEOUT_EXIT_CODE = 124
+GDB_SCRIPTS_DIR = Path(__file__).parent / "gdb_scripts"
 
 # Messages printed by the default ASPIS handlers, or by custom handlers that
 # override them (those may even exit successfully).
 DATA_CORRUPTION_MARKERS = ("Data corruption detected", "DATA_CORRUPTION_DETECTED")
 CONTROL_FLOW_MARKERS = ("Control-flow signature mismatch", "SIG_MISMATCH_DETECTED")
-SIGNAL_MARKERS = (
-    "Program received signal",
-    "Program terminated with signal",
-    "stop reason = signal",
-)
+SIGNAL_MARKERS = ("Program received signal", "Program terminated with signal")
 
 
-class BaseInjector(ABC):
+def gdb_command(gdb: str, script: str | Path, binary: str | Path, args: list[str]) -> list[str]:
+    # -nx: the user's .gdbinit (e.g. pwndbg, "set print pretty") must not
+    # change the output format that is parsed.
+    return [gdb, "-nx", "--batch", "-q", "-x", str(script), "--args", str(binary), *args]
 
-    @staticmethod
-    def create_for_target(
-        injection: RegisterInjection | MemoryInjection | GlobalInjection,
-        env: Environment,
-        target_bin: str | Path,
-        target_src: str | Path,
-        target_function: TargetFunction,
-        debugger: str | None = None,
-        timeout_ms: int = DEFAULT_TIMEOUT_MS,
-    ) -> list["BaseInjector"]:
-        """Build the injectors required by one configured target function.
 
-        Memory and global injection create one injector per selected variable,
-        or a single untargeted injector when no variable of that kind is set.
-        """
-        common_args = (env, target_bin, target_src, target_function.name)
-        common_kwargs = {"debugger": debugger, "timeout_ms": timeout_ms}
-        lengths = {v.name: v.length for v in target_function.variables if v.length}
-        if lengths:
-            common_kwargs["var_lengths"] = ",".join(
-                f"{name}:{length}" for name, length in lengths.items()
-            )
+def dump_env(function: TargetFunction) -> dict[str, str]:
+    """Environment telling the GDB scripts which function and variables to dump."""
+    return {
+        "TARGET_FUNC": function.name,
+        "DUMP_VARS": ",".join(
+            variable.name + (f":{variable.length}" if variable.length else "")
+            for variable in function.variables
+        ),
+    }
 
-        if isinstance(injection, RegisterInjection):
-            return [
-                RegisterInjector(
-                    *common_args, data_only=injection.data_only, **common_kwargs
-                )
-            ]
-        if isinstance(injection, MemoryInjection):
-            local_vars = [v for v in target_function.variables if not v.is_global]
-            if not local_vars:
-                return [MemoryInjector(*common_args, **common_kwargs)]
-            return [
-                MemoryInjector(
-                    *common_args,
-                    payload_ptr=variable.name,
-                    length_var=str(variable.length) if variable.length else "",
-                    **common_kwargs,
-                )
-                for variable in local_vars
-            ]
-        if isinstance(injection, GlobalInjection):
-            global_vars = [v for v in target_function.variables if v.is_global]
-            if not global_vars:
-                return [GlobalInjector(*common_args, **common_kwargs)]
-            return [
-                GlobalInjector(*common_args, target_global=variable.name, **common_kwargs)
-                for variable in global_vars
-            ]
-        raise TypeError(
-            f"Unsupported injection configuration: {type(injection).__name__}"
-        )
+
+def create_injectors(
+    injection: Injection,
+    gdb: str,
+    target_bin: str | Path,
+    target_src: str | Path,
+    function: TargetFunction,
+    args: list[str] | None = None,
+    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+) -> list["Injector"]:
+    """Build the injectors required by one configured target function.
+
+    Memory and global injection create one injector per selected variable of
+    their kind, or a single untargeted injector when there is none.
+    """
+    def injector(script, **options):
+        return Injector(script, options, gdb, target_bin, function, args or [], timeout_ms)
+
+    if isinstance(injection, RegisterInjection):
+        return [injector("inject_registers.py",
+                         DATA_ONLY_MODE="1" if injection.data_only else "0")]
+    if isinstance(injection, MemoryInjection):
+        local_vars = [v for v in function.variables if not v.is_global]
+        return [
+            injector("inject_memory.py", PAYLOAD_PTR=v.name, LENGTH_VAR=str(v.length or ""))
+            for v in local_vars
+        ] or [injector("inject_memory.py")]
+    if isinstance(injection, GlobalInjection):
+        global_vars = [v for v in function.variables if v.is_global]
+        return [
+            injector("inject_globals.py", TARGET_GLOBAL=v.name) for v in global_vars
+        ] or [injector("inject_globals.py", TARGET_SRC=Path(target_src).name)]
+    raise TypeError(f"Unsupported injection configuration: {type(injection).__name__}")
+
+
+class Injector:
+    """Run a GDB injection script on the protected binary and classify the outcome."""
 
     def __init__(
         self,
-        env: Environment,
-        target_bin: str | Path,
-        target_src: str | Path,
-        target_func: str = "main",
-        debugger: str | None = None,
-        timeout_ms: int = DEFAULT_TIMEOUT_MS,
-        var_lengths: str = "",
-    ):
-        self.env = env
-        self.target_bin = Path(target_bin).resolve()
-        self.target_src = Path(target_src).resolve()
-        self.target_func = target_func
-        self.debugger = debugger
-        self.timeout_ms = timeout_ms
-        self.var_lengths = var_lengths
-        self.base_dir = Path(__file__).parent.resolve() / "gdb_scripts"
-        # Profiling is expensive, so setup() runs once per argument list and is
-        # shared by the threads that run injections concurrently.
-        self._setup_lock = threading.Lock()
-        self._setup_cache: dict | None = None
-        self._setup_args: tuple[str, ...] | None = None
-        self._profile_args: list[str] = []
-
-    @abstractmethod
-    def setup(self) -> dict:
-        """Returns a dictionary of environment variables required for the injection."""
-
-    @property
-    @abstractmethod
-    def gdb_script(self) -> str:
-        """Returns the specific GDB Python script path to execute."""
-
-    def _debugger(self) -> str | None:
-        """Return the configured debugger if it can be found, otherwise None."""
-        debugger = self.debugger if self.debugger is not None else self.env.gdb_executable
-        if debugger and shutil.which(str(debugger)):
-            return str(debugger)
-        return None
-
-    def _debugger_command(
-        self,
-        debugger: str,
         script: str,
-        args: list[str] | None = None,
-    ) -> list[str | Path]:
-        return [
-            debugger, "--batch", "-q", "-x", script,
-            "--args", self.target_bin, *(args or []),
-        ]
+        options: dict[str, str],
+        gdb: str,
+        target_bin: str | Path,
+        function: TargetFunction,
+        args: list[str],
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    ):
+        self.script = GDB_SCRIPTS_DIR / script
+        self.options = options
+        self.gdb = gdb
+        self.target_bin = Path(target_bin).resolve()
+        self.function = function
+        self.args = args
+        self.timeout_ms = timeout_ms
+        # Profiling is expensive: it runs once and is shared by the threads
+        # that run injections concurrently.
+        self._profile_lock = threading.Lock()
+        self._profile: dict[str, str] | None = None
 
-    def _debugger_failed_to_start(self, process: subprocess.CompletedProcess) -> bool:
-        output = f"{process.stdout}\n{process.stderr}".lower()
-        startup_errors = (
-            "don't know how to run",
-            "unable to launch the executable",
-            "process exited with status -1",
-            "error: process launch failed",
+    def _run_gdb(self, script: str | Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            gdb_command(self.gdb, script, self.target_bin, self.args),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env={**os.environ, **env},
+            timeout=self.timeout_ms / 1000,
+            stdin=subprocess.DEVNULL,
         )
-        return process.returncode != 0 or any(error in output for error in startup_errors)
 
-    def profile_target(self) -> dict:
-        """Runs the profiling script and extracts steps and valid registers."""
-        debugger = self._debugger()
-        if debugger is None:
-            raise RuntimeError("Target profiling failed:\ngdb is not installed.")
+    def profile(self) -> dict[str, str]:
+        """Return MAX_STEPS and TARGET_REGS measured on a fault-free run."""
+        with self._profile_lock:
+            if self._profile is None:
+                self._profile = self._measure_profile()
+            return self._profile
 
-        env = os.environ.copy()
-        env["TARGET_FUNC"] = self.target_func
-        env["INFERIOR_OUT"] = os.devnull
-        profile_script = str(self.base_dir / "profile_target.py")
+    def _measure_profile(self) -> dict[str, str]:
         try:
-            result = subprocess.run(
-                self._debugger_command(debugger, profile_script, self._profile_args),
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=self.timeout_ms / 1000.0,
-                stdin=subprocess.DEVNULL,
-            )
+            result = self._run_gdb(GDB_SCRIPTS_DIR / "profile_target.py",
+                                   {"TARGET_FUNC": self.function.name})
         except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                "Target profiling failed:\n"
-                f"{debugger}: profiling timed out after {self.timeout_ms} ms"
-            )
+            raise RuntimeError(f"Target profiling timed out after {self.timeout_ms} ms")
+        values = dict(
+            line.split("=", 1) for line in result.stdout.splitlines()
+            if line.startswith(("PROFILED_STEPS=", "PROFILED_REGS="))
+        )
+        steps = values.get("PROFILED_STEPS", "")
+        if result.returncode != 0 or not steps.isdigit():
+            details = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"Target profiling failed:\n{details}")
+        if int(steps) < 1:
+            raise RuntimeError(f"'{self.function.name}' has no instruction to inject into.")
+        if self.script.name == "inject_registers.py" and not values.get("PROFILED_REGS"):
+            raise RuntimeError(f"No register found in '{self.function.name}'.")
+        return {"MAX_STEPS": steps, "TARGET_REGS": values.get("PROFILED_REGS", "")}
 
-        profile_data = {}
-        for line in result.stdout.splitlines():
-            if line.startswith("PROFILED_STEPS="):
-                profile_data["MAX_STEPS"] = line.split("=", 1)[1]
-            elif line.startswith("PROFILED_REGS="):
-                profile_data["TARGET_REGS"] = line.split("=", 1)[1]
-
-        if (
-            not self._debugger_failed_to_start(result)
-            and profile_data.get("MAX_STEPS", "").isdigit()
-        ):
-            return profile_data
-        details = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"Target profiling failed:\n{debugger}: {details}")
-
-    def run(self, args: list[str] | None = None) -> ExecutionResult:
-        """Executes a single injection and extracts the final execution state."""
-        args = args or []
-        run_env = os.environ.copy()
-
-        with self._setup_lock:
-            if self._setup_cache is None or self._setup_args != tuple(args):
-                self._profile_args = list(args)
-                self._setup_cache = self.setup()
-                self._setup_args = tuple(args)
-            run_env.update(self._setup_cache)
-
-        debugger = self._debugger()
-        if debugger is None:
-            raise RuntimeError("gdb is not installed.")
-
-        # The GDB scripts redirect the program's own stdout into this file.
-        with tempfile.NamedTemporaryFile(delete=False) as temp_out:
-            inferior_out = Path(temp_out.name)
-        run_env["INFERIOR_OUT"] = str(inferior_out)
-        run_env["ENTRY_FUNC"] = self.target_func
-        if self.var_lengths:
-            run_env["VAR_LENGTHS"] = self.var_lengths
-
-        try:
-            # The timeout catches infinite loops caused by corrupted jumps.
+    def run(self) -> ExecutionResult:
+        """Execute a single injection and extract the final execution state."""
+        env = {**self.profile(), **self.options, **dump_env(self.function)}
+        with tempfile.TemporaryDirectory(prefix="injection-") as directory:
+            # The GDB scripts redirect the program's own output into these files.
+            out, err = Path(directory, "stdout"), Path(directory, "stderr")
+            env.update(INFERIOR_OUT=str(out), INFERIOR_ERR=str(err))
             try:
-                process = subprocess.run(
-                    self._debugger_command(debugger, self.gdb_script, args),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    env=run_env,
-                    timeout=self.timeout_ms / 1000.0,
-                    stdin=subprocess.DEVNULL,
-                )
-                exit_code, stdout, stderr = process.returncode, process.stdout, process.stderr
+                process = self._run_gdb(self.script, env)
+                timed_out = False
+                gdb_stdout, gdb_stderr = process.stdout, process.stderr
             except subprocess.TimeoutExpired as error:
-                exit_code = TIMEOUT_EXIT_CODE
-                stdout = self._decode_timeout_output(error.stdout)
-                stderr = self._decode_timeout_output(error.stderr)
+                # The timeout catches infinite loops caused by corrupted jumps.
+                timed_out = True
+                gdb_stdout, gdb_stderr = _text(error.stdout), _text(error.stderr)
+            stdout = _read(out)
+            stderr = _read(err)
 
-            try:
-                program_output = inferior_out.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                program_output = ""
+        debugger_output = gdb_stdout + gdb_stderr
+        state = ExecutionState(stdout=stdout.strip(), stderr=stderr.strip(),
+                               debugger_output=debugger_output)
+        dump = debug_output.parse_dump(gdb_stdout)
+        if dump is None:
+            # The program crashed, or ASPIS stopped it, before the return.
+            state.error = "The target function did not reach its return."
+        else:
+            state.variables, state.registers = dump
 
-            event = self._termination_event(exit_code, stdout + stderr + program_output)
-            state = self._extract_state(stdout, stderr, inferior_out)
-        finally:
-            inferior_out.unlink(missing_ok=True)
-
+        if timed_out:
+            event = TerminationEvent.TIMEOUT
+        else:
+            event = termination_event(process.returncode, debugger_output + stdout + stderr)
         return ExecutionResult(event=event, state=state)
 
-    @staticmethod
-    def _termination_event(exit_code: int, output: str) -> TerminationEvent:
-        if exit_code == TIMEOUT_EXIT_CODE:
-            return TerminationEvent.TIMEOUT
-        if any(marker in output for marker in DATA_CORRUPTION_MARKERS):
-            return TerminationEvent.ASPIS_DATA
-        if any(marker in output for marker in CONTROL_FLOW_MARKERS):
-            return TerminationEvent.ASPIS_CF
-        if any(marker in output for marker in SIGNAL_MARKERS):
-            return TerminationEvent.CRASHED
-        if exit_code != 0 or "[FATAL]" in output or "Uncaught Exception" in output:
-            return TerminationEvent.INTERNAL_ERROR
-        return TerminationEvent.RETURNED
 
-    def _decode_timeout_output(self, output: str | bytes | None) -> str:
-        if output is None:
-            return ""
-        return output.decode() if isinstance(output, bytes) else output
-
-    def _extract_state(self, stdout: str, stderr: str, inferior_out: Path) -> ExecutionState:
-        """Parses the GDB output to extract variables and registers into a typed state."""
-        state = ExecutionState(
-            stdout=(
-                inferior_out.read_text(encoding="utf-8", errors="replace").strip()
-                if inferior_out.exists()
-                else ""
-            ),
-            stderr=stderr,
-            debugger_output=stdout,
-        )
-
-        try:
-            state.variables = {
-                **self._parse_debug_variables(stdout, "@@ARGS@@", "@@LOCALS@@"),
-                **self._parse_debug_variables(stdout, "@@LOCALS@@", "@@REGISTERS@@"),
-            }
-            state.registers = debug_output.parse_registers(
-                self._section(stdout, "@@REGISTERS@@")
-            )
-        except Exception as e:
-            # The program crashed, or ASPIS stopped it, before the return statement.
-            state.error = f"Failed to extract state (Crash or Guardrail): {str(e)}"
-
-        return state
-
-    def _parse_debug_variables(self, output: str, start: str, end: str) -> dict:
-        return debug_output.parse_variables(self._section(output, start, end))
-
-    def _section(self, output: str, start: str, end: str | None = None) -> str:
-        text = debug_output.section(output, start, end)
-        if text is None:
-            raise ValueError(f"Snapshot marker {start} not found in output.")
-        return text
+def termination_event(exit_code: int, output: str) -> TerminationEvent:
+    if any(marker in output for marker in DATA_CORRUPTION_MARKERS):
+        return TerminationEvent.ASPIS_DATA
+    if any(marker in output for marker in CONTROL_FLOW_MARKERS):
+        return TerminationEvent.ASPIS_CF
+    if any(marker in output for marker in SIGNAL_MARKERS):
+        return TerminationEvent.CRASHED
+    if exit_code != 0 or "[FATAL]" in output:
+        return TerminationEvent.INTERNAL_ERROR
+    return TerminationEvent.RETURNED
 
 
-class RegisterInjector(BaseInjector):
-    def __init__(
-        self,
-        env: Environment,
-        target_bin: str | Path,
-        target_src: str | Path,
-        target_func: str = "main",
-        data_only: bool = False,
-        debugger: str | None = None,
-        timeout_ms: int = DEFAULT_TIMEOUT_MS,
-        var_lengths: str = "",
-    ):
-        super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms, var_lengths)
-        self.data_only = data_only
-
-    @property
-    def gdb_script(self) -> str:
-        return str(self.base_dir / "inject_registers.py")
-
-    def setup(self) -> dict:
-        profile_data = self.profile_target()
-        if "MAX_STEPS" not in profile_data or "TARGET_REGS" not in profile_data:
-            raise RuntimeError("Profiling failed to extract necessary step limits or registers.")
-        return {
-            "TARGET_FUNC": self.target_func,
-            "MAX_STEPS": profile_data["MAX_STEPS"],
-            "TARGET_REGS": profile_data["TARGET_REGS"],
-            "DATA_ONLY_MODE": "1" if self.data_only else "0",
-        }
+def _text(output: str | bytes | None) -> str:
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output or ""
 
 
-class MemoryInjector(BaseInjector):
-    def __init__(
-        self,
-        env: Environment,
-        target_bin: str | Path,
-        target_src: str | Path,
-        target_func: str = "main",
-        payload_ptr: str = "",
-        length_var: str = "",
-        debugger: str | None = None,
-        timeout_ms: int = DEFAULT_TIMEOUT_MS,
-        var_lengths: str = "",
-    ):
-        super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms, var_lengths)
-        self.payload_ptr = payload_ptr
-        self.length_var = length_var
-        # With a named variable the fault lands inside it; otherwise on the stack.
-        self.data_only = bool(payload_ptr)
-
-    @property
-    def gdb_script(self) -> str:
-        return str(self.base_dir / "inject_memory.py")
-
-    def setup(self) -> dict:
-        profile_data = self.profile_target()
-        if "MAX_STEPS" not in profile_data:
-            raise RuntimeError("Profiling failed to extract maximum dynamic instructions.")
-        return {
-            "TARGET_FUNC": self.target_func,
-            "MAX_STEPS": profile_data["MAX_STEPS"],
-            "PAYLOAD_PTR": self.payload_ptr,
-            "LENGTH_VAR": self.length_var,
-            "DATA_ONLY_MODE": "1" if self.data_only else "0",
-        }
-
-
-class GlobalInjector(BaseInjector):
-    def __init__(
-        self,
-        env: Environment,
-        target_bin: str | Path,
-        target_src: str | Path,
-        target_func: str = "main",
-        target_global: str = "",
-        debugger: str | None = None,
-        timeout_ms: int = DEFAULT_TIMEOUT_MS,
-        var_lengths: str = "",
-    ):
-        super().__init__(env, target_bin, target_src, target_func, debugger, timeout_ms, var_lengths)
-        self.target_global = target_global
-
-    @property
-    def gdb_script(self) -> str:
-        return str(self.base_dir / "inject_globals.py")
-
-    def setup(self) -> dict:
-        profile_data = self.profile_target()
-        if "MAX_STEPS" not in profile_data:
-            raise RuntimeError("Profiling failed to extract maximum dynamic instructions.")
-        return {
-            "TARGET_FUNC": self.target_func,
-            "MAX_STEPS": profile_data["MAX_STEPS"],
-            "TARGET_GLOBAL": self.target_global,
-            "TARGET_SRC": str(self.target_src.name),
-        }
-
-
-class NormalExecution(BaseInjector):
-    """Executes the target natively without injecting a fault, capturing the baseline state."""
-
-    @property
-    def gdb_script(self) -> str:
-        return str(self.base_dir / "extract_baseline_state.py")
-
-    def setup(self) -> dict:
-        return {}
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""

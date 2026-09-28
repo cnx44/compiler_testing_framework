@@ -109,7 +109,7 @@ functions: []
         )
 
     def test_maps_all_data_protection_modes(self):
-        transformer = RunnerConfigTransformer()
+        transformer = RunnerConfigTransformer(Path("."))
         expected = {
             "eddi": DataProtectionMode.EDDI,
             "seddi": DataProtectionMode.SEDDI,
@@ -121,7 +121,7 @@ functions: []
                 self.assertIs(transformer.DATA_PROTECTION(text), mode)
 
     def test_maps_all_control_flow_modes(self):
-        transformer = RunnerConfigTransformer()
+        transformer = RunnerConfigTransformer(Path("."))
         expected = {
             "cfcss": ControlFlowMode.CFCSS,
             "rasm": ControlFlowMode.RASM,

@@ -1,19 +1,11 @@
-"""Utilities used by the interactive configuration editor.
-
-Keeping serialization outside the curses application makes it possible to test
-that the UI always writes a configuration accepted by :mod:`config_parser`.
-"""
-
-from __future__ import annotations
+"""Serialize campaigns in the configuration language parsed by config_parser."""
 
 import json
 
-from src.constants import DEFAULT_TIMEOUT_MS
 from src.config_parser import (
     Campaign,
-    ControlFlowMode,
-    DataProtectionMode,
     GlobalInjection,
+    Injection,
     MemoryInjection,
     RegisterInjection,
     RunnerTest,
@@ -21,45 +13,64 @@ from src.config_parser import (
 )
 
 
+def config_block(
+    name: str,
+    programs: list[str],
+    data_protection: str,
+    control_flow_protection: str,
+    timeout_ms: int | str,
+    execution_repetitions: int | str,
+    injection: str,
+    measure_overhead: bool = True,
+    measurement_repetitions: int | str | None = None,
+    compiler_flags: str = "",
+    functions: str = "",
+) -> str:
+    """Return one test block; ``compiler_flags`` and ``functions`` are the
+    comma-separated list contents."""
+    lines = [
+        f"name: {name}",
+        f"programs: [{', '.join(json.dumps(str(program)) for program in programs)}]",
+        f"data_protection: {data_protection}",
+        f"control_flow_protection: {control_flow_protection}",
+        f"timeout_ms: {timeout_ms}",
+        f"execution_repetitions: {execution_repetitions}",
+    ]
+    if not measure_overhead:
+        lines.append("measure_overhead: false")
+    if measurement_repetitions:
+        lines.append(f"measurement_repetitions: {measurement_repetitions}")
+    if compiler_flags:
+        lines.append(f"compiler_flags: [{compiler_flags}]")
+    lines.append(f"injection: {injection}")
+    if functions:
+        lines.append(f"functions: [{functions}]")
+    return "\n".join(lines) + "\n"
+
+
 def campaign_to_text(campaign: Campaign) -> str:
-    """Return the canonical configuration language representation of a campaign."""
     if not campaign.runs:
         raise ValueError("A configuration must contain at least one test.")
-    return "\n".join(_test_to_lines(run) for run in campaign.runs) + "\n"
+    return "".join(run_to_text(run) for run in campaign.runs)
 
 
-def _test_to_lines(run: RunnerTest) -> str:
-    lines = [
-        f"name: {run.name}",
-        f"programs: [{', '.join(json.dumps(program) for program in run.programs)}]",
-        f"data_protection: {data_mode_text(run.data_protection)}",
-        f"control_flow_protection: {control_mode_text(run.control_flow_protection)}",
-    ]
-    if run.timeout_ms != DEFAULT_TIMEOUT_MS:
-        lines.append(f"timeout_ms: {run.timeout_ms}")
-    if run.execution_repetitions != 1:
-        lines.append(f"execution_repetitions: {run.execution_repetitions}")
-    if not run.measure_overhead:
-        lines.append("measure_overhead: false")
-    if run.measurement_repetitions is not None:
-        lines.append(f"measurement_repetitions: {run.measurement_repetitions}")
-    if run.compiler_flags:
-        lines.append(f"compiler_flags: [{', '.join(run.compiler_flags)}]")
-    lines.append(f"injection: {injection_text(run.injection)}")
-    if run.functions:
-        lines.append(f"functions: [{', '.join(function_text(item) for item in run.functions)}]")
-    return "\n".join(lines)
+def run_to_text(run: RunnerTest) -> str:
+    return config_block(
+        run.name,
+        run.programs,
+        run.data_protection.value,
+        run.control_flow_protection.value,
+        run.timeout_ms,
+        run.execution_repetitions,
+        injection_text(run.injection),
+        run.measure_overhead,
+        run.measurement_repetitions,
+        ", ".join(run.compiler_flags),
+        ", ".join(function_text(function) for function in run.functions),
+    )
 
 
-def data_mode_text(mode: DataProtectionMode) -> str:
-    return mode.name.lower()
-
-
-def control_mode_text(mode: ControlFlowMode) -> str:
-    return mode.name.lower().replace("_", "-")
-
-
-def injection_text(injection: RegisterInjection | MemoryInjection | GlobalInjection) -> str:
+def injection_text(injection: Injection) -> str:
     if isinstance(injection, RegisterInjection):
         return f"register data_only: {'true' if injection.data_only else 'false'}"
     if isinstance(injection, MemoryInjection):

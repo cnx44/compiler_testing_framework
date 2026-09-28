@@ -23,23 +23,12 @@ from itertools import product
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 from src.campaign_runner import CampaignRun
-from src.config_builder import (
-    campaign_to_text,
-    control_mode_text,
-    data_mode_text,
-    function_text,
-    injection_text,
-)
-from src.constants import DEFAULT_TIMEOUT_MS
-from src.config_parser import (
-    Campaign,
-    RunnerTest,
-    parse_runner_config,
-)
+from src.config_builder import campaign_to_text, function_text, injection_text, config_block
+from src.config_parser import DEFAULT_TIMEOUT_MS
+from src.config_parser import Campaign, RunnerTest, parse_config_text, parse_runner_config
 from src.env import Environment
 from src.file_io import atomic_write_text
 from src.source_symbols import analyze_source, SourceAnalysisError
@@ -82,14 +71,14 @@ class ConfigurationDraft:
     name: str = "test"
     programs: list[str] = field(default_factory=list)
     batch_directory: str = ""
-    data_mode: str | list[str] = field(default_factory=lambda: ["eddi"])
-    control_mode: str | list[str] = field(default_factory=lambda: ["cfcss"])
+    data_mode: list[str] = field(default_factory=lambda: ["eddi"])
+    control_mode: list[str] = field(default_factory=lambda: ["cfcss"])
     timeout: str = str(DEFAULT_TIMEOUT_MS)
     repetitions: str = "100"
     measure_overhead: bool = True
     measurement_repetitions: str = ""
     compiler_flags: str = "-lm"
-    injection: str | list[str] = field(default_factory=lambda: ["register data_only: false"])
+    injection: list[str] = field(default_factory=lambda: ["register data_only: false"])
     functions: str | dict[str, str] = "main"
 
 
@@ -243,11 +232,7 @@ class AspisTui:
         configs = self._file_picker(
             "Select one or more configuration files", multi=True, suffixes={".cfg"}
         )
-        if not configs:
-            return
-        if isinstance(configs, Path):
-            configs = [configs]
-        for config in configs:
+        for config in configs or []:
             self._run_configuration(config)
 
     def _run_configuration(self, config: Path) -> None:
@@ -405,9 +390,9 @@ class AspisTui:
             elif key in (curses.KEY_DOWN, ord("j")):
                 offset += 1
             elif key in (ord("s"), ord("S")):
-                self._sdc_inspector(name, result, state_key="sdc_states", title_prefix="SDC")
+                self._state_inspector(result, "sdc_states", "SDC")
             elif key in (ord("t"), ord("T")):
-                self._sdc_inspector(name, result, state_key="latent_states", title_prefix="LATENT")
+                self._state_inspector(result, "latent_states", "LATENT")
             elif key in (ord("g"), ord("G")) and log is not None:
                 self._paged_text(
                     "ASPIS · Campaign log",
@@ -415,7 +400,7 @@ class AspisTui:
                     "↑↓/jk scroll · Esc return to summary",
                 )
 
-    def _sdc_inspector(self, name: str, result: dict, state_key: str = "sdc_states", title_prefix: str = "SDC") -> None:
+    def _state_inspector(self, result: dict, state_key: str, title_prefix: str) -> None:
         sdc_states = result.get("injections", {}).get(state_key, [])
         if not sdc_states:
             self._message(
@@ -511,7 +496,7 @@ class AspisTui:
         target = destination / filename
         try:
             text = _draft_text(draft)
-            _validate_config_text(text)
+            parse_config_text(text)
             try:
                 with target.open("x", encoding="utf-8") as handle:
                     handle.write(text)
@@ -580,7 +565,7 @@ class AspisTui:
                     *campaign.runs[index + 1 :],
                 ]
             text = campaign_to_text(Campaign(runs=runs))
-            _validate_config_text(text)
+            parse_config_text(text)
             atomic_write_text(config, text)
         except _QuitTui:
             raise
@@ -650,7 +635,7 @@ class AspisTui:
                     errors = _draft_errors(draft)
                     if not errors:
                         try:
-                            _validate_config_text(_draft_text(draft))
+                            _campaign_from_draft(draft)
                         except Exception as error:
                             errors.append(str(error))
                     if errors:
@@ -693,16 +678,16 @@ class AspisTui:
             return
         if key == "data_mode":
             value = self._choose_many(
-                "Data protection (one or more)", DATA_MODES, _mode_values(draft.data_mode)
+                "Data protection (one or more)", DATA_MODES, draft.data_mode
             )
         elif key == "control_mode":
             value = self._choose_many(
                 "Control-flow protection (one or more)",
                 CONTROL_MODES,
-                _mode_values(draft.control_mode),
+                draft.control_mode,
             )
         elif key == "injection":
-            value = self._edit_injection(_mode_values(draft.injection))
+            value = self._edit_injection(draft.injection)
         elif key == "functions":
             self._scope_menu(draft)
             return
@@ -716,12 +701,11 @@ class AspisTui:
                 "repetitions": "Execution repetitions",
                 "measurement_repetitions": "Measurement reps (empty = same as execution reps)",
                 "compiler_flags": "Comma-separated compiler/linker flags",
-                "functions": "Functions/variables, e.g. main(x:4), helper",
             }
             value = self._ask_text(
                 labels[key],
                 str(getattr(draft, key)),
-                allow_empty=key in {"compiler_flags", "functions", "measurement_repetitions"},
+                allow_empty=key in {"compiler_flags", "measurement_repetitions"},
             )
         if value is not None:
             setattr(draft, key, value)
@@ -795,12 +779,12 @@ class AspisTui:
             },
         )
 
-    def _select_batch_directory(self, draft: ConfigurationDraft) -> bool:
+    def _select_batch_directory(self, draft: ConfigurationDraft) -> None:
         directory = self._file_picker(
             "Select a batch directory", select_directory=True
         )
         if directory is None:
-            return False
+            return
         programs = sorted(
             path.resolve()
             for path in directory.iterdir()
@@ -812,10 +796,9 @@ class AspisTui:
                 "The selected directory contains no .c, .cpp, or .rs files.",
                 error=True,
             )
-            return False
+            return
         draft.batch_directory = str(directory.resolve())
         draft.programs = [str(path) for path in programs]
-        return True
 
     def _file_picker(
         self,
@@ -1140,20 +1123,14 @@ def _environment_from_values(values: dict[str, str]) -> Environment:
     )
 
 
-def _toolchain_payload(environment: Environment) -> dict:
-    return {
+def _save_toolchain(path: Path, environment: Environment) -> None:
+    payload = {
         "aspis_path": str(environment.aspis_path),
         "llvm_path": str(environment.llvm_path),
         "vanilla_compiler": environment.vanilla_compiler,
         "aspis_flags": list(environment.aspis_flags),
     }
-
-
-def _save_toolchain(path: Path, environment: Environment) -> None:
-    atomic_write_text(
-        path,
-        json.dumps(_toolchain_payload(environment), indent=2) + "\n",
-    )
+    atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
 def _load_toolchain(path: Path, fallback: Environment) -> Environment:
@@ -1219,7 +1196,7 @@ def _draft_field_value(draft: ConfigurationDraft, key: str) -> str:
     if key != "programs":
         value = getattr(draft, key)
         if key in {"data_mode", "control_mode", "injection"}:
-            return ", ".join(_mode_values(value))
+            return ", ".join(value)
         if key == "functions" and isinstance(value, dict):
             return "(configured per-file)"
         return str(value)
@@ -1239,9 +1216,9 @@ def _draft_errors(draft: ConfigurationDraft) -> list[str]:
         errors.append("Name: use letters, numbers, underscores, or hyphens only.")
     if not draft.programs:
         errors.append("Select at least one source file.")
-    if not _mode_values(draft.data_mode):
+    if not draft.data_mode:
         errors.append("Select at least one data-protection mode.")
-    if not _mode_values(draft.control_mode):
+    if not draft.control_mode:
         errors.append("Select at least one control-flow-protection mode.")
     for program in draft.programs:
         path = Path(program)
@@ -1260,44 +1237,9 @@ def _draft_errors(draft: ConfigurationDraft) -> list[str]:
     return errors
 
 
-def _configuration_text(
-    name,
-    programs,
-    data_mode,
-    control_mode,
-    timeout,
-    repetitions,
-    flags,
-    injection,
-    functions,
-    measure_overhead=True,
-    measurement_repetitions="",
-) -> str:
-    lines = [
-        f"name: {name}",
-        f"programs: [{', '.join(json.dumps(str(program)) for program in programs)}]",
-        f"data_protection: {data_mode}",
-        f"control_flow_protection: {control_mode}",
-        f"timeout_ms: {timeout}",
-        f"execution_repetitions: {repetitions}",
-    ]
-    if not measure_overhead:
-        lines.append("measure_overhead: false")
-    if measurement_repetitions:
-        lines.append(f"measurement_repetitions: {measurement_repetitions}")
-    if flags:
-        lines.append(f"compiler_flags: [{flags}]")
-    lines.append(f"injection: {injection}")
-    if functions:
-        lines.append(f"functions: [{functions}]")
-    return "\n".join(lines) + "\n"
-
-
 def _draft_text(draft: ConfigurationDraft) -> str:
     programs = draft.programs if draft.batch_directory else [draft.programs]
-    modes = list(product(
-        _mode_values(draft.data_mode), _mode_values(draft.control_mode), _mode_values(draft.injection)
-    ))
+    modes = list(product(draft.data_mode, draft.control_mode, draft.injection))
     blocks = []
     used_names = set()
     multiple_modes = len(modes) > 1
@@ -1324,39 +1266,24 @@ def _draft_text(draft: ConfigurationDraft) -> str:
                                       draft.functions.get(p, "main") for p in run_programs)))
             else:
                 file_functions = draft.functions
-            blocks.append(
-                _configuration_text(
-                    name,
-                    run_programs,
-                    data_mode,
-                    control_mode,
-                    draft.timeout,
-                    draft.repetitions,
-                    draft.compiler_flags,
-                    injection,
-                    file_functions,
-                    measure_overhead=draft.measure_overhead,
-                    measurement_repetitions=draft.measurement_repetitions,
-                ).rstrip()
-            )
-    return "\n".join(blocks) + "\n"
-
-
-def _mode_values(value: str | Iterable[str]) -> list[str]:
-    """Normalize old single-value drafts and new multi-value drafts."""
-    return [value] if isinstance(value, str) else list(value)
+            blocks.append(config_block(
+                name, run_programs, data_mode, control_mode, draft.timeout,
+                draft.repetitions, injection, draft.measure_overhead,
+                draft.measurement_repetitions, draft.compiler_flags, file_functions,
+            ))
+    return "".join(blocks)
 
 
 def _campaign_from_draft(draft: ConfigurationDraft) -> Campaign:
-    return _parse_config_text(_draft_text(draft))
+    return parse_config_text(_draft_text(draft))
 
 
 def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
     return ConfigurationDraft(
         name=run.name,
         programs=list(run.programs),
-        data_mode=[data_mode_text(run.data_protection)],
-        control_mode=[control_mode_text(run.control_flow_protection)],
+        data_mode=[run.data_protection.value],
+        control_mode=[run.control_flow_protection.value],
         timeout=str(run.timeout_ms),
         repetitions=str(run.execution_repetitions),
         measure_overhead=run.measure_overhead,
@@ -1365,21 +1292,6 @@ def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
         injection=[injection_text(run.injection)],
         functions=", ".join(function_text(function) for function in run.functions),
     )
-
-
-def _validate_config_text(text: str) -> None:
-    _parse_config_text(text)
-
-
-def _parse_config_text(text: str) -> Campaign:
-    """Parse configuration text with the same parser used for files on disk."""
-    with NamedTemporaryFile("w", suffix=".cfg", encoding="utf-8", delete=False) as handle:
-        handle.write(text)
-        path = Path(handle.name)
-    try:
-        return parse_runner_config(path)
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def _wrapped_lines(lines: Iterable[str], width: int) -> list[str]:
