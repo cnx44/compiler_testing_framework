@@ -17,6 +17,7 @@ from src.config_parser import (
     MemoryInjection,
     RegisterInjection,
     RunnerTest,
+    TargetFunction,
 )
 
 
@@ -31,8 +32,8 @@ def _test_to_lines(run: RunnerTest) -> str:
     lines = [
         f"name: {run.name}",
         f"programs: [{', '.join(json.dumps(program) for program in run.programs)}]",
-        f"data_protection: {_data_mode(run.data_protection)}",
-        f"control_flow_protection: {_control_mode(run.control_flow_protection)}",
+        f"data_protection: {data_mode_text(run.data_protection)}",
+        f"control_flow_protection: {control_mode_text(run.control_flow_protection)}",
     ]
     if run.timeout_ms != DEFAULT_TIMEOUT_MS:
         lines.append(f"timeout_ms: {run.timeout_ms}")
@@ -44,21 +45,21 @@ def _test_to_lines(run: RunnerTest) -> str:
         lines.append(f"measurement_repetitions: {run.measurement_repetitions}")
     if run.compiler_flags:
         lines.append(f"compiler_flags: [{', '.join(run.compiler_flags)}]")
-    lines.append(f"injection: {_injection(run.injection)}")
+    lines.append(f"injection: {injection_text(run.injection)}")
     if run.functions:
-        lines.append(f"functions: [{', '.join(_function(item) for item in run.functions)}]")
+        lines.append(f"functions: [{', '.join(function_text(item) for item in run.functions)}]")
     return "\n".join(lines)
 
 
-def _data_mode(mode: DataProtectionMode) -> str:
+def data_mode_text(mode: DataProtectionMode) -> str:
     return mode.name.lower()
 
 
-def _control_mode(mode: ControlFlowMode) -> str:
+def control_mode_text(mode: ControlFlowMode) -> str:
     return mode.name.lower().replace("_", "-")
 
 
-def _injection(injection: RegisterInjection | MemoryInjection | GlobalInjection) -> str:
+def injection_text(injection: RegisterInjection | MemoryInjection | GlobalInjection) -> str:
     if isinstance(injection, RegisterInjection):
         return f"register data_only: {'true' if injection.data_only else 'false'}"
     if isinstance(injection, MemoryInjection):
@@ -68,7 +69,8 @@ def _injection(injection: RegisterInjection | MemoryInjection | GlobalInjection)
     raise TypeError(f"Unsupported injection: {type(injection)!r}")
 
 
-def _function(function) -> str:
+def function_text(function: TargetFunction) -> str:
+    """Render ``main`` or ``main(x, @G, buf:4)``."""
     if not function.variables:
         return function.name
     variables = ", ".join(

@@ -27,13 +27,16 @@ from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 from src.campaign_runner import CampaignRun
-from src.config_builder import campaign_to_text
+from src.config_builder import (
+    campaign_to_text,
+    control_mode_text,
+    data_mode_text,
+    function_text,
+    injection_text,
+)
 from src.constants import DEFAULT_TIMEOUT_MS
 from src.config_parser import (
     Campaign,
-    GlobalInjection,
-    MemoryInjection,
-    RegisterInjection,
     RunnerTest,
     parse_runner_config,
 )
@@ -50,6 +53,16 @@ WORD = re.compile(r"^[A-Za-z0-9_-]+$")
 TOOLCHAIN_CONFIG = ".aspis-tui.json"
 DEFAULT_ASPIS_PATH = "/mnt/misto/projects/ASPIS/aspis.sh"
 DEFAULT_LLVM_PATH = "/home/cnx/llvm-21.1.8/build/bin"
+ENTER_KEYS = (curses.KEY_ENTER, 10, 13)
+OUTCOME_LABELS = (
+    ("masked", "Masked"),
+    ("latent", "Latent (State mismatch)"),
+    ("sdc", "SDC (Silent Data Corrupt)"),
+    ("timeout", "Timeouts (Infinite loop)"),
+    ("crash", "Crashes (HW, Segfault)"),
+    ("aspis_data", "ASPIS Data (Detected)"),
+    ("aspis_cf", "ASPIS CF (Detected)"),
+)
 
 
 class _QuitTui(Exception):
@@ -110,15 +123,16 @@ class AspisTui:
             curses.init_pair(3, curses.COLOR_RED, -1)
 
     def _home(self) -> None:
-        choice = 0
-        choices = [
-            "Run campaign",
-            "Create configuration",
-            "Edit configuration",
-            "Configure toolchain",
-            "View campaign results",
-            "Exit",
+        actions = [
+            ("Run campaign", self._run_test),
+            ("Create configuration", self._create_configuration),
+            ("Edit configuration", self._edit_configuration),
+            ("Configure toolchain", self._configure_toolchain),
+            ("View campaign results", self._view_campaign_results),
+            ("Exit", None),
         ]
+        choices = [label for label, _ in actions]
+        choice = 0
         while True:
             self._frame("ASPIS · Campaign console", "↑↓/jk select · Enter confirm")
             roomy = self._height() >= 24
@@ -135,23 +149,15 @@ class AspisTui:
                 attr = self._selected_attr() if index == choice else 0
                 self._write(first_row + (index - offset) * step, 5, f"{marker} {label}", attr)
             key = self._key()
-            if key in (curses.KEY_ENTER, 10, 13) and choice == 5:
-                return
             if key in (curses.KEY_UP, ord("k")):
                 choice = (choice - 1) % len(choices)
             elif key in (curses.KEY_DOWN, ord("j")):
                 choice = (choice + 1) % len(choices)
-            elif key in (curses.KEY_ENTER, 10, 13):
-                if choice == 0:
-                    self._run_test()
-                elif choice == 1:
-                    self._create_configuration()
-                elif choice == 2:
-                    self._edit_configuration()
-                elif choice == 3:
-                    self._configure_toolchain()
-                elif choice == 4:
-                    self._view_campaign_results()
+            elif key in ENTER_KEYS:
+                action = actions[choice][1]
+                if action is None:
+                    return
+                action()
 
     def _configure_toolchain(self) -> None:
         values = {
@@ -196,7 +202,7 @@ class AspisTui:
                 selected = (selected - 1) % (len(fields) + 1)
             elif key_code in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % (len(fields) + 1)
-            elif key_code in (curses.KEY_ENTER, 10, 13):
+            elif key_code in ENTER_KEYS:
                 if selected < len(fields):
                     key, label = fields[selected]
                     value = self._ask_text(
@@ -314,32 +320,6 @@ class AspisTui:
                     future.result()
                     return
 
-    def _results(self, config: Path, results: list[dict], log: list[str]) -> None:
-        if not results:
-            self._paged_text(
-                "ASPIS · Results",
-                log or ["The campaign produced no results."],
-                "Esc return to menu",
-            )
-            return
-        selected = 0
-        while True:
-            result = results[selected]
-            lines = _result_lines(result)
-            footer = "←→/hl test · g full log · Esc return to menu"
-            self._frame(f"ASPIS · Results · {config.name} ({selected + 1}/{len(results)})", footer)
-            for row, line in enumerate(_fit_lines(lines, self._width() - 6, self._height() - 5), start=3):
-                self._write(row, 3, line)
-            key = self._key()
-            if key in (27, ord("q")):
-                return
-            if key in (curses.KEY_LEFT, ord("h")):
-                selected = (selected - 1) % len(results)
-            elif key in (curses.KEY_RIGHT, ord("l")):
-                selected = (selected + 1) % len(results)
-            elif key in (ord("g"), ord("G")):
-                self._paged_text("ASPIS · Log", log, "↑↓/jk scroll · Esc return to results")
-
     def _view_campaign_results(self) -> None:
         result_file = self._file_picker(
             "Select campaign results (.json)", suffixes={".json"}
@@ -366,10 +346,6 @@ class AspisTui:
             result = results[selected]
             injections = result.get("injections", {})
             total = injections.get("total", 0)
-            
-            def pct(count):
-                if total == 0: return "0%"
-                return f"{(count / total) * 100:.1f}%"
 
             lines = [
                 f"CAMPAIGN: {name} - TEST: {result['name']} ({selected + 1}/{len(results)})",
@@ -377,29 +353,26 @@ class AspisTui:
                 "CONFIGURATION & OVERHEAD",
                 f"  Per-process timeout       : {result.get('timeout_ms', 'n/a')} ms",
             ]
-            
+
             diff = result.get("difference", {})
-            for field, label in [
+            for measure, label in [
                 ("binary_size_bytes", "Binary size"),
                 ("execution_time_seconds", "Execution time"),
             ]:
-                delta = diff.get(field, {})
+                delta = diff.get(measure, {})
                 percent = delta.get("percent")
                 percent_str = "n/a" if percent is None else f"{percent:+.2f}%"
                 lines.append(f"  {label:25}: {percent_str}")
-            
+
             lines.extend([
                 "",
                 "FAULT INJECTION RESULTS",
                 f"  Total injections          : {total}",
-                f"  Masked                    : {injections.get('masked', 0):<5} ({pct(injections.get('masked', 0))})",
-                f"  Latent (State mismatch)   : {injections.get('latent', 0):<5} ({pct(injections.get('latent', 0))})",
-                f"  SDC (Silent Data Corrupt) : {injections.get('sdc', 0):<5} ({pct(injections.get('sdc', 0))})",
-                f"  Timeouts (Infinite loop)  : {injections.get('timeout', 0):<5} ({pct(injections.get('timeout', 0))})",
-                f"  Crashes (HW, Segfault)    : {injections.get('crash', 0):<5} ({pct(injections.get('crash', 0))})",
-                f"  ASPIS Data (Detected)     : {injections.get('aspis_data', 0):<5} ({pct(injections.get('aspis_data', 0))})",
-                f"  ASPIS CF (Detected)       : {injections.get('aspis_cf', 0):<5} ({pct(injections.get('aspis_cf', 0))})",
             ])
+            for key, label in OUTCOME_LABELS:
+                count = injections.get(key, 0)
+                percent = f"{count / total * 100:.1f}%" if total else "0%"
+                lines.append(f"  {label:26}: {count:<5} ({percent})")
 
             error_count = sum(line.startswith("ERROR:") for line in (log or []))
             if error_count:
@@ -417,7 +390,7 @@ class AspisTui:
             offset = min(offset, max(0, len(wrapped) - height))
             for row, line in enumerate(wrapped[offset:offset + height], start=3):
                 self._write(row, 3, line)
-            
+
             key = self._key()
             if key in (27, ord("q")):
                 return
@@ -461,35 +434,24 @@ class AspisTui:
                 "",
                 "DIFFERENCES FROM ORACLE:",
             ]
-            
-            # STDOUT
-            if state.get("stdout") != oracle.get("stdout"):
-                lines.extend([
-                    "--- STDOUT ---",
-                    f"- ORACLE: {oracle.get('stdout', '')!r}",
-                    f"+ ASPIS:  {state.get('stdout', '')!r}",
-                    ""
-                ])
-                
-            # STDERR
-            if state.get("stderr") != oracle.get("stderr"):
-                lines.extend([
-                    "--- STDERR ---",
-                    f"- ORACLE: {oracle.get('stderr', '')!r}",
-                    f"+ ASPIS:  {state.get('stderr', '')!r}",
-                    ""
-                ])
-                
-            # VARIABLES
+            for stream in ("stdout", "stderr"):
+                if state.get(stream) != oracle.get(stream):
+                    lines.extend([
+                        f"--- {stream.upper()} ---",
+                        f"- ORACLE: {oracle.get(stream, '')!r}",
+                        f"+ ASPIS:  {state.get(stream, '')!r}",
+                        "",
+                    ])
+
             oracle_vars = oracle.get("snapshots", {}).get(
                 state.get("function"), oracle
             ).get("variables", {})
             aspis_vars = state.get("variables", {})
-            all_vars = sorted(set(oracle_vars) | set(aspis_vars))
-            var_lines = []
-            for var in all_vars:
-                if oracle_vars.get(var) != aspis_vars.get(var):
-                    var_lines.append(f"  {var}: ORACLE={oracle_vars.get(var, '<missing>')} ASPIS={aspis_vars.get(var, '<missing>')}")
+            var_lines = [
+                f"  {var}: ORACLE={oracle_vars.get(var, '<missing>')} ASPIS={aspis_vars.get(var, '<missing>')}"
+                for var in sorted(set(oracle_vars) | set(aspis_vars))
+                if oracle_vars.get(var) != aspis_vars.get(var)
+            ]
             if var_lines:
                 lines.append("--- VARIABLES ---")
                 lines.extend(var_lines)
@@ -625,7 +587,7 @@ class AspisTui:
         except Exception as error:
             self._message("Unable to save", str(error), error=True)
             return
-        
+
         if draft == "DELETE":
             self._message("Configuration updated", "Test deleted successfully.")
         else:
@@ -681,7 +643,7 @@ class AspisTui:
                 selected = (selected - 1) % (max_index + 1)
             elif key_code in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % (max_index + 1)
-            elif key_code in (curses.KEY_ENTER, 10, 13):
+            elif key_code in ENTER_KEYS:
                 if selected == delete_index:
                     return "DELETE"
                 if selected == save_index:
@@ -746,10 +708,7 @@ class AspisTui:
             return
         elif key == "measure_overhead":
             choice = self._choose("Measure overhead", ["Yes", "No"])
-            if choice:
-                value = choice == "Yes"
-            else:
-                value = None
+            value = choice == "Yes" if choice else None
         else:
             labels = {
                 "name": "Test name",
@@ -960,7 +919,7 @@ class AspisTui:
                 selected = (selected - 1) % len(options)
             elif key in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % len(options)
-            elif key in (curses.KEY_ENTER, 10, 13):
+            elif key in ENTER_KEYS:
                 return options[selected]
 
     def _choose_many(
@@ -998,23 +957,12 @@ class AspisTui:
             elif key in (curses.KEY_DOWN, ord("j")):
                 selected = (selected + 1) % max(1, row_count)
             elif selected < len(options) and (key == ord(" ") or
-                    (toggle_enter and key in (curses.KEY_ENTER, 10, 13))):
+                    (toggle_enter and key in ENTER_KEYS)):
                 checked.symmetric_difference_update({options[selected]})
-            elif key in (curses.KEY_ENTER, 10, 13) or (toggle_enter and key == ord(" ")):
+            elif key in ENTER_KEYS or (toggle_enter and key == ord(" ")):
                 if checked or allow_empty:
                     return [option for option in options if option in checked]
                 self._message("Selection required", "Select at least one option.", error=True)
-
-    def _ask_positive(self, title: str, default: str) -> str | None:
-        value = self._ask_text(title, default)
-        if value is None:
-            return None
-        if not value.isdigit() or int(value) < 1:
-            self._message(
-                "Invalid value", "Enter a positive integer.", error=True
-            )
-            return None
-        return value
 
     def _ask_text(
         self, title: str, default: str, allow_empty: bool = False
@@ -1400,79 +1348,38 @@ def _mode_values(value: str | Iterable[str]) -> list[str]:
 
 
 def _campaign_from_draft(draft: ConfigurationDraft) -> Campaign:
-    with NamedTemporaryFile("w", suffix=".cfg", encoding="utf-8", delete=False) as handle:
-        handle.write(_draft_text(draft))
-        path = Path(handle.name)
-    try:
-        return parse_runner_config(path)
-    finally:
-        path.unlink(missing_ok=True)
+    return _parse_config_text(_draft_text(draft))
 
 
 def _draft_from_run(run: RunnerTest) -> ConfigurationDraft:
-    if isinstance(run.injection, RegisterInjection):
-        injection = (
-            f"register data_only: {'true' if run.injection.data_only else 'false'}"
-        )
-    elif isinstance(run.injection, MemoryInjection):
-        injection = "memory"
-    elif isinstance(run.injection, GlobalInjection):
-        injection = "global"
-    else:
-        raise TypeError(f"Unsupported injection: {type(run.injection).__name__}")
-    functions = ", ".join(
-        function.name
-        if not function.variables
-        else (
-            f"{function.name}("
-            + ", ".join(
-                ("@" if variable.is_global else "") + variable.name
-                if variable.length is None
-                else ("@" if variable.is_global else "") + f"{variable.name}:{variable.length}"
-                for variable in function.variables
-            )
-            + ")"
-        )
-        for function in run.functions
-    )
     return ConfigurationDraft(
         name=run.name,
         programs=list(run.programs),
-        data_mode=[run.data_protection.name.lower()],
-        control_mode=[run.control_flow_protection.name.lower().replace("_", "-")],
+        data_mode=[data_mode_text(run.data_protection)],
+        control_mode=[control_mode_text(run.control_flow_protection)],
         timeout=str(run.timeout_ms),
         repetitions=str(run.execution_repetitions),
         measure_overhead=run.measure_overhead,
         measurement_repetitions=str(run.measurement_repetitions) if run.measurement_repetitions is not None else "",
         compiler_flags=", ".join(run.compiler_flags),
-        injection=[injection],
-        functions=functions,
+        injection=[injection_text(run.injection)],
+        functions=", ".join(function_text(function) for function in run.functions),
     )
 
 
 def _validate_config_text(text: str) -> None:
+    _parse_config_text(text)
+
+
+def _parse_config_text(text: str) -> Campaign:
+    """Parse configuration text with the same parser used for files on disk."""
     with NamedTemporaryFile("w", suffix=".cfg", encoding="utf-8", delete=False) as handle:
         handle.write(text)
         path = Path(handle.name)
     try:
-        parse_runner_config(path)
+        return parse_runner_config(path)
     finally:
         path.unlink(missing_ok=True)
-
-
-def _result_lines(result: dict) -> list[str]:
-    oracle, aspis, difference = result["oracle"], result["aspis"], result["difference"]
-    lines = [f"TEST  {result['name']}", f"  per-process timeout: {result.get('timeout_ms', 'n/a')} ms", "", "OUTCOME", f"  return code     oracle {oracle['returncode']}   ASPIS {aspis['returncode']}",
-             f"  stdout          {'same' if oracle['stdout'] == aspis['stdout'] else 'DIFFERENT'}",
-             f"  stderr          {'same' if oracle['stderr'] == aspis['stderr'] else 'DIFFERENT'}", "", "MEASUREMENTS"]
-    for field, unit in (("execution_time_seconds", "s"), ("binary_size_bytes", "B")):
-        delta = difference[field]
-        percentage = "n/a" if delta["percent"] is None else f"{delta['percent']:+.2f}%"
-        lines.append(f"  {field}: oracle {oracle[field]:.6g} {unit} · ASPIS {aspis[field]:.6g} {unit} · Δ {delta['absolute']:+.6g} ({percentage})")
-    lines.extend(["", "VARIABLES"])
-    names = sorted(set(oracle.get("variables", {})) | set(aspis.get("variables", {})))
-    lines.extend(f"  {'OK' if oracle.get('variables', {}).get(name) == aspis.get('variables', {}).get(name) else 'DIFF':4} {name}: {oracle.get('variables', {}).get(name, '<missing>')} → {aspis.get('variables', {}).get(name, '<missing>')}" for name in names)
-    return lines
 
 
 def _wrapped_lines(lines: Iterable[str], width: int) -> list[str]:
@@ -1485,8 +1392,7 @@ def _wrapped_lines(lines: Iterable[str], width: int) -> list[str]:
 def _fit_lines(lines: Iterable[str], width: int, height: int) -> list[str]:
     output = []
     for line in lines:
-        chunks = [line[index:index + max(1, width)] for index in range(0, max(1, len(line)), max(1, width))] or [""]
-        output.extend(chunks)
+        output.extend(_wrapped_lines([line], width))
         if len(output) >= height:
             return output[:height]
     return output

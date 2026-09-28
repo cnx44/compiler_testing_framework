@@ -3,7 +3,11 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from gdb_utils import continue_to_function_return, run_to_function
+from gdb_utils import (
+    continue_to_function_return,
+    dump_requested_variables,
+    run_to_function,
+)
 
 
 def main():
@@ -36,30 +40,7 @@ def main():
     except gdb.error:
         pass
 
-    gdb.execute('printf "@@GLOBALS@@\\n"')
-    for var_name in vars_to_check:
-        gdb.execute(f'printf "{var_name} = "')
-        try:
-            gdb.execute(f"output {var_name}")
-        except gdb.error as e:
-            print(f"<error: {e}>")
-        gdb.execute('printf "\\n"')
-
-    # Print dynamically bounded variables correctly (overwriting raw pointer values)
-    var_lengths_str = os.environ.get("VAR_LENGTHS", "")
-    if var_lengths_str:
-        gdb.execute('printf "@@LOCALS@@\\n"')
-        for pair in var_lengths_str.split(","):
-            if ":" in pair:
-                var_name, var_len = pair.split(":", 1)
-                var_name, var_len = var_name.strip(), var_len.strip()
-                gdb.execute(f'printf "{var_name} = "')
-                try:
-                    # *var_name@var_len prints the pointer as an array of that length
-                    gdb.execute(f"output *{var_name}@{var_len}")
-                except gdb.error as e:
-                    print(f"<error: {e}>")
-                gdb.execute('printf "\\n"')
+    dump_requested_variables(vars_to_check)
 
     gdb.execute('printf "@@REGISTERS@@\\n"')
     try:

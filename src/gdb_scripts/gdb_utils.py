@@ -65,6 +65,47 @@ def continue_to_function_return(entry_func="main"):
         breakpoint.delete()
 
 
+def print_value(name, expression):
+    """Print one ``name = value`` line of the state dump."""
+    gdb.execute(f'printf "{name} = "')
+    try:
+        gdb.execute(f"output {expression}")
+    except gdb.error as e:
+        print(f"<error: {e}>")
+    gdb.execute('printf "\\n"')
+
+
+def dump_requested_variables(vars_to_check):
+    """Print the configured variables, then the VAR_LENGTHS arrays.
+
+    The arrays go in a second @@LOCALS@@ section so that their full contents
+    replace the raw pointer values printed by ``info locals``.
+    """
+    gdb.execute('printf "@@GLOBALS@@\\n"')
+    for var_name in vars_to_check:
+        print_value(var_name, var_name)
+
+    var_lengths_str = os.environ.get("VAR_LENGTHS", "")
+    if var_lengths_str:
+        gdb.execute('printf "@@LOCALS@@\\n"')
+        for pair in var_lengths_str.split(","):
+            if ":" in pair:
+                var_name, var_len = pair.split(":", 1)
+                var_name, var_len = var_name.strip(), var_len.strip()
+                # *ptr@len prints the pointer as an array of that length
+                print_value(var_name, f"*{var_name}@{var_len}")
+
+
+def start_at_function(target_func):
+    """Start the inferior and stop at the entry of ``target_func``."""
+    gdb.execute("start")
+    gdb.execute("delete")
+    if gdb.newest_frame().name() != target_func:
+        bp = gdb.Breakpoint(target_func)
+        gdb.execute("continue")
+        bp.delete()
+
+
 def continue_and_dump_state():
     """Continues to the configured function return and dumps its state."""
     entry_func = os.environ.get("ENTRY_FUNC", "main")
@@ -88,29 +129,8 @@ def continue_and_dump_state():
         gdb.execute('printf "@@LOCALS@@\\n"')
         gdb.execute("info locals")
         
-        gdb.execute('printf "@@GLOBALS@@\\n"')
-        for var_name in vars_to_check:
-            gdb.execute(f'printf "{var_name} = "')
-            try:
-                gdb.execute(f"output {var_name}")
-            except gdb.error as e:
-                print(f"<error: {e}>")
-            gdb.execute('printf "\\n"')
-            
-        var_lengths_str = os.environ.get("VAR_LENGTHS", "")
-        if var_lengths_str:
-            gdb.execute('printf "@@LOCALS@@\\n"')
-            for pair in var_lengths_str.split(","):
-                if ":" in pair:
-                    var_name, var_len = pair.split(":", 1)
-                    var_name, var_len = var_name.strip(), var_len.strip()
-                    gdb.execute(f'printf "{var_name} = "')
-                    try:
-                        gdb.execute(f"output *{var_name}@{var_len}")
-                    except gdb.error as e:
-                        print(f"<error: {e}>")
-                    gdb.execute('printf "\\n"')
-            
+        dump_requested_variables(vars_to_check)
+
         gdb.execute('printf "@@REGISTERS@@\\n"')
         gdb.execute("info registers")
     except gdb.error:

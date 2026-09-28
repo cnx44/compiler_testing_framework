@@ -5,7 +5,7 @@ import sys
 
 # Tell GDB's Python interpreter to look in the current folder for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from gdb_utils import continue_and_dump_state, get_arch_config
+from gdb_utils import continue_and_dump_state, start_at_function, get_arch_config
 
 gdb.execute("set pagination off")
 gdb.execute("set confirm off")
@@ -41,13 +41,7 @@ def inject_smart_register():
 
         out_file = os.environ.get("INFERIOR_OUT", ".inferior_out.txt")
         gdb.execute(f"set args > {out_file}")
-        gdb.execute("start")
-        gdb.execute("delete")
-
-        if gdb.newest_frame().name() != target_func:
-            bp = gdb.Breakpoint(target_func)
-            gdb.execute("continue")
-            bp.delete()
+        start_at_function(target_func)
 
         steps = random.randint(1, max_steps)
         gdb.execute(f"nexti {steps}", to_string=True)

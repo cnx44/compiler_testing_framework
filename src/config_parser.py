@@ -72,10 +72,10 @@ class RunnerConfigTransformer(Transformer):
 
     def ESCAPED_STRING(self, token):
         return json.loads(str(token))
-    
+
     def BOOLEAN(self, token):
         return str(token) == "true"
-        
+
     @staticmethod
     def _token_to_enum(enum_type, token):
         enum_name = str(token).upper().replace("-", "_")
@@ -126,13 +126,13 @@ class RunnerConfigTransformer(Transformer):
     def register_mode(self, items):
         data_only = items[1] if items else False
         return RegisterInjection(data_only=data_only)
-        
+
     def memory_mode(self, items):
         return MemoryInjection()
-        
+
     def global_mode(self, items):
         return GlobalInjection()
-        
+
     def injection(self, items):
         return ("injection", items[1])
 
@@ -146,15 +146,15 @@ class RunnerConfigTransformer(Transformer):
         if isinstance(length, str) and length.isdigit():
             length = int(length)
         return TargetVariable(name=name, length=length, is_global=is_global)
-        
+
     def var_list(self, items):
         return list(items)
-        
+
     def function_def(self, items):
         name = items[0]
         variables = items[1] if len(items) > 1 else []
         return TargetFunction(name=name, variables=variables)
-        
+
     def function_list(self, items):
         return list(items)
 
@@ -163,46 +163,44 @@ class RunnerConfigTransformer(Transformer):
         return ("functions", lists[0] if lists else [])
 
     def test(self, items):
-          values = [
-              item for item in items
-              if not str(item).endswith(":") and str(item) != "\n"
-          ]
+        # Drop the "key:" tokens and newlines; what remains is the four
+        # mandatory values in grammar order followed by (key, value) options.
+        values = [
+            item for item in items
+            if not str(item).endswith(":") and str(item) != "\n"
+        ]
+        optional = dict(item for item in values[4:] if isinstance(item, tuple))
 
-          optional = dict(item for item in values[4:] if isinstance(item, tuple))
-
-          return RunnerTest(
-              name=values[0],
-              programs=values[1],
-              data_protection=values[2],
-              control_flow_protection=values[3],
-              compiler_flags=optional.get("compiler_flags", []),
-              execution_repetitions=optional.get("execution_repetitions", 1),
-              measure_overhead=optional.get("measure_overhead", True),
-              measurement_repetitions=optional.get("measurement_repetitions", None),
-              functions=optional.get("functions", [TargetFunction(name="main")]),
-              injection=optional.get("injection", RegisterInjection()),
-              timeout_ms=optional.get("timeout_ms", DEFAULT_TIMEOUT_MS),
-          )
+        return RunnerTest(
+            name=values[0],
+            programs=values[1],
+            data_protection=values[2],
+            control_flow_protection=values[3],
+            compiler_flags=optional.get("compiler_flags", []),
+            execution_repetitions=optional.get("execution_repetitions", 1),
+            measure_overhead=optional.get("measure_overhead", True),
+            measurement_repetitions=optional.get("measurement_repetitions", None),
+            functions=optional.get("functions", [TargetFunction(name="main")]),
+            injection=optional.get("injection", RegisterInjection()),
+            timeout_ms=optional.get("timeout_ms", DEFAULT_TIMEOUT_MS),
+        )
 
     def campaign(self, items):
-          return Campaign(runs=list(items))
+        return Campaign(runs=list(items))
 
-"""Parses a campaign configuration file into a typed Campaign object."""
+
 def parse_runner_config(config_path: str | Path) -> Campaign:
-    # Load the grammar and initialize the LALR parser
-    grammar_path = Path(__file__).with_name("grammar.lark")
-    grammar = grammar_path.read_text(encoding="utf-8")
+    """Parse a campaign configuration file into a typed Campaign object.
+
+    Relative program paths are resolved against the configuration's directory.
+    """
+    grammar = Path(__file__).with_name("grammar.lark").read_text(encoding="utf-8")
     parser = Lark(grammar, start="campaign", parser="lalr")
 
-
-    # Read the configuration source and build the Parse Tree
     config_path = Path(config_path).expanduser().resolve()
-    source = config_path.read_text(encoding="utf-8")
-    tree = parser.parse(source)
-
-
-    # Transform the tree into the final domain object
+    tree = parser.parse(config_path.read_text(encoding="utf-8"))
     campaign = cast(Campaign, RunnerConfigTransformer().transform(tree))
+
     runs = [
         replace(
             run,

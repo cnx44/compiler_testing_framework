@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
 import concurrent.futures
+from dataclasses import asdict
+from datetime import datetime
+import json
 import math
 from pathlib import Path
 import os
-import platform
 import re
 import shlex
 import shutil
@@ -12,12 +14,32 @@ import subprocess
 import tempfile
 import time
 
+from src import debug_output
 from src.config_parser import Campaign, ControlFlowMode, DataProtectionMode
 from src.constants import DEFAULT_TIMEOUT_MS
 from src.env import Environment
 from src.file_io import atomic_write_text
 from src.injector import BaseInjector
 from src.models import TerminationEvent
+
+IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+HEX_ADDRESS = re.compile(r"0x[0-9a-fA-F]+")
+GDB_SCRIPTS_DIR = Path(__file__).parent / "gdb_scripts"
+
+ASPIS_DATA_FLAGS = {
+    DataProtectionMode.EDDI: ["--eddi"],
+    DataProtectionMode.SEDDI: ["--seddi"],
+    DataProtectionMode.FDSC: ["--fdsc"],
+    DataProtectionMode.NONE: ["--no-dup"],
+}
+ASPIS_CONTROL_FLAGS = {
+    ControlFlowMode.CFCSS: ["--cfcss"],
+    ControlFlowMode.RASM: ["--rasm"],
+    ControlFlowMode.INTER_RASM: ["--inter-rasm"],
+    ControlFlowMode.NONE: ["--no-cfc"],
+}
+# Compiler options whose next argument is a path.
+PATH_OPTIONS = {"-I", "-L", "-include", "-iquote", "-isystem", "--sysroot"}
 
 
 class ProgramRunner(ABC):
@@ -36,6 +58,7 @@ class ProgramRunner(ABC):
         self.exe = ""
         self.results: dict = {}
         self.size = 0
+        self.var_lengths: dict[str, str] = {}
         self._build_dir: tempfile.TemporaryDirectory[str] | None = None
 
     def compile(
@@ -45,14 +68,13 @@ class ProgramRunner(ABC):
     ):
         """Compile ``programs`` and keep the resulting binary available."""
         sources = self._source_files(programs)
-        compiler_flags = compiler_flags or []
         self.src = str(sources[0])
-        self._cleanup()
+        self.cleanup()
         self._build_dir = tempfile.TemporaryDirectory(prefix="program-run-")
         self.exe = str(Path(self._build_dir.name) / "program")
 
         try:
-            self._compile(sources, compiler_flags)
+            self._compile(sources, compiler_flags or [])
             executable = Path(self.exe)
             if not executable.is_file():
                 raise RuntimeError(
@@ -64,7 +86,7 @@ class ProgramRunner(ABC):
                 "binary_size_bytes": self.size,
             }
         except Exception:
-            self._cleanup()
+            self.cleanup()
             raise
 
     def execute(
@@ -83,18 +105,15 @@ class ProgramRunner(ABC):
             raise ValueError("measurement_repetitions must be a positive integer when measure_overhead is true.")
 
         self.var_lengths = var_lengths or {}
-
         args = args or []
+        repetitions = measurement_repetitions if measure_overhead else 1
+
         execution_times = []
-        run_result = None
-        
-        reps = measurement_repetitions if measure_overhead else 1
-        
-        for _ in range(reps):
+        for _ in range(repetitions):
             started_at = time.perf_counter()
             try:
                 run_result = subprocess.run(
-                    [self._exe_command(), *args],
+                    [self.exe, *args],
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_ms / 1000.0,
@@ -106,18 +125,12 @@ class ProgramRunner(ABC):
                 ) from error
             execution_times.append(time.perf_counter() - started_at)
 
+        mean = standard_deviation = standard_error = 0.0
         if measure_overhead:
             mean = statistics.fmean(execution_times)
-            standard_deviation = (
-                statistics.stdev(execution_times)
-                if reps > 1
-                else 0.0
-            )
-            standard_error = standard_deviation / math.sqrt(reps) if reps > 0 else 0.0
-        else:
-            mean = 0.0
-            standard_deviation = 0.0
-            standard_error = 0.0
+            if repetitions > 1:
+                standard_deviation = statistics.stdev(execution_times)
+            standard_error = standard_deviation / math.sqrt(repetitions)
 
         self.results = {
             "stdout": run_result.stdout.strip(),
@@ -127,15 +140,13 @@ class ProgramRunner(ABC):
             "execution_time_samples_seconds": execution_times,
             "execution_time_stddev_seconds": standard_deviation,
             "execution_time_standard_error_seconds": standard_error,
-            "measurement_repetitions": reps,
+            "measurement_repetitions": repetitions,
             "binary_size_bytes": self.size,
         }
-        function_names = list(dict.fromkeys(functions_to_check or ["main"]))
+
         snapshots = {
-            function_name: self._debug_snapshot(
-                args, variables_to_check, function_name
-            )
-            for function_name in function_names
+            function_name: self._debug_snapshot(args, variables_to_check, function_name)
+            for function_name in dict.fromkeys(functions_to_check or ["main"])
         }
         variables = {}
         registers = {}
@@ -178,7 +189,9 @@ class ProgramRunner(ABC):
 
     def cleanup(self):
         """Release the temporary build directory, if present."""
-        self._cleanup()
+        if self._build_dir is not None:
+            self._build_dir.cleanup()
+            self._build_dir = None
 
     @abstractmethod
     def _compile(self, sources: list[Path], compiler_flags: list[str]):
@@ -199,6 +212,7 @@ class ProgramRunner(ABC):
         variables_to_check: list[str] | None = None,
         target_function: str = "main",
     ):
+        """Stop at the end of ``target_function`` and read its variables and registers."""
         target_function = self._debug_function_name(target_function)
         errors = []
         for debugger in self._debuggers():
@@ -215,23 +229,14 @@ class ProgramRunner(ABC):
                 errors.append(f"{debugger}: {debug_result.stderr.strip()}")
                 continue
 
-            locals_end = (
-                "@@GLOBALS@@"
-                if "@@GLOBALS@@" in debug_result.stdout
-                else "@@REGISTERS@@"
-            )
+            output = debug_result.stdout
+            locals_end = "@@GLOBALS@@" if "@@GLOBALS@@" in output else "@@REGISTERS@@"
             variables = {
-                **self._parse_debug_variables(
-                    debug_result.stdout, "@@ARGS@@", "@@LOCALS@@"
-                ),
-                **self._parse_debug_variables(
-                    debug_result.stdout, "@@LOCALS@@", locals_end
-                ),
-                **self._parse_debug_variables(
-                    debug_result.stdout, "@@GLOBALS@@", "@@REGISTERS@@"
-                ),
+                **self._parse_debug_variables(output, "@@ARGS@@", "@@LOCALS@@"),
+                **self._parse_debug_variables(output, "@@LOCALS@@", locals_end),
+                **self._parse_debug_variables(output, "@@GLOBALS@@", "@@REGISTERS@@"),
             }
-            registers = self._parse_debug_registers(debug_result.stdout)
+            registers = self._parse_debug_registers(output)
             if registers:
                 return {"variables": variables, "registers": registers}
             errors.append(f"{debugger}: no registers were found")
@@ -240,11 +245,8 @@ class ProgramRunner(ABC):
         raise RuntimeError(f"Debug snapshot failed:\n{details}")
 
     def _debuggers(self):
-        if self.debugger is not None:
-            candidates = [self.debugger]
-        else:
-            candidates = [self.environment.gdb_executable]
-        return [debugger for debugger in candidates if shutil.which(debugger)]
+        debugger = self.debugger if self.debugger is not None else self.environment.gdb_executable
+        return [debugger] if shutil.which(debugger) else []
 
     def _run_debugger(
         self,
@@ -255,27 +257,21 @@ class ProgramRunner(ABC):
     ):
         variable_names = self._debug_variable_names(variables_to_check or [])
         target_function = self._debug_function_name(target_function)
-        debugger_name = Path(debugger).name.lower()
-        if "gdb" not in debugger_name:
+        if "gdb" not in Path(debugger).name.lower():
             raise ValueError(f"Unsupported debugger: {debugger}")
-        
+
         run_env = os.environ.copy()
         run_env["TARGET_SRC"] = str(self.src)
         run_env["TARGET_FUNC"] = target_function
         run_env["VARS_TO_CHECK"] = ",".join(variable_names)
-        
-        if hasattr(self, "var_lengths") and self.var_lengths:
+        if self.var_lengths:
             run_env["VAR_LENGTHS"] = ",".join(f"{k}:{v}" for k, v in self.var_lengths.items())
-        
-        base_dir = Path(__file__).parent / "gdb_scripts"
-        
-        script = base_dir / "snapshot_gdb.py"
+
         command = [
             debugger, "--batch", "-q",
-            "-x", str(script),
-            "--args", self.exe, *args
+            "-x", str(GDB_SCRIPTS_DIR / "snapshot_gdb.py"),
+            "--args", self.exe, *args,
         ]
-            
         return subprocess.run(
             command,
             capture_output=True,
@@ -286,11 +282,7 @@ class ProgramRunner(ABC):
         )
 
     def _debug_variable_names(self, variable_names: list[str]):
-        invalid = [
-            name
-            for name in variable_names
-            if re.fullmatch(r"[A-Za-z_]\w*", name) is None
-        ]
+        invalid = [name for name in variable_names if IDENTIFIER.fullmatch(name) is None]
         if invalid:
             raise ValueError(
                 f"Invalid debugger variable name(s): {', '.join(invalid)}"
@@ -298,45 +290,21 @@ class ProgramRunner(ABC):
         return variable_names
 
     def _debug_function_name(self, function_name: str):
-        if re.fullmatch(r"[A-Za-z_]\w*", function_name) is None:
+        if IDENTIFIER.fullmatch(function_name) is None:
             raise ValueError(f"Invalid debugger function name: {function_name}")
         return function_name
 
     def _parse_debug_variables(self, output: str, start: str, end: str):
-        section = self._section(output, start, end)
-        variables = {}
-        for line in section.splitlines():
-            if " = " in line:
-                name, value = line.split(" = ", 1)
-                match = re.match(r"^\s*(?:\([^)]*\)\s*)?([A-Za-z_]\w*)$", name)
-                if match and value.strip():
-                    variables[match.group(1)] = value.strip()
-        return variables
+        return debug_output.parse_variables(
+            self._section(output, start, end), keep_empty=False
+        )
 
     def _parse_debug_registers(self, output: str):
-        section = self._section(output, "@@REGISTERS@@", None)
-        registers = {}
-        for line in section.splitlines():
-            match = re.match(r"^\s*(\S+)\s+(?:=\s+)?(\S+)", line)
-            if match:
-                registers[match.group(1)] = match.group(2)
-        return registers
+        return debug_output.parse_registers(self._section(output, "@@REGISTERS@@", None))
 
     def _section(self, output: str, start: str, end: str | None):
-        if start not in output:
-            return ""
-        section = output.split(start, 1)[1]
-        if end is not None and end in section:
-            section = section.split(end, 1)[0]
-        return section.strip()
+        return debug_output.section(output, start, end) or ""
 
-    def _exe_command(self):
-        return self.exe
-
-    def _cleanup(self):
-        if self._build_dir is not None:
-            self._build_dir.cleanup()
-            self._build_dir = None
 
 class OracleRunner(ProgramRunner):
     """Runs the unprotected reference program with the vanilla compiler."""
@@ -402,12 +370,12 @@ class AspisRunner(ProgramRunner):
         command.extend(self._aspis_mode_args())
         command.extend(self.environment.aspis_flags)
         command.extend(str(source.resolve()) for source in sources)
-        
-        # Automatically inject default fault handlers so the user doesn't have to write them
+
+        # Link the default fault handlers so the user doesn't have to write them.
         handlers_path = Path(__file__).parent / "aspis_handlers.c"
         if handlers_path.is_file():
             command.append(str(handlers_path.resolve()))
-            
+
         command.extend(self._compiler_flags_for_build_dir(compiler_flags or []))
 
         compile_result = subprocess.run(
@@ -423,40 +391,26 @@ class AspisRunner(ProgramRunner):
             raise RuntimeError(f"ASPIS compilation failed:\n{details}")
 
     def _compiler_flags_for_build_dir(self, compiler_flags: list[str]):
-        """Keep relative compiler paths relative to the campaign directory."""
-        path_options = {"-I", "-L", "-include", "-iquote", "-isystem", "--sysroot"}
-        joined_options = ("-I", "-L")
+        """Keep relative compiler paths relative to the campaign directory.
+
+        ASPIS runs inside its temporary build directory, so path arguments
+        (``-I dir``, ``-Idir``, ``--sysroot=dir``, ...) are made absolute.
+        """
         normalized = []
-        index = 0
-        while index < len(compiler_flags):
-            flag = compiler_flags[index]
-            if flag in path_options and index + 1 < len(compiler_flags):
-                normalized.extend([
-                    flag,
-                    self._absolute_flag_path(compiler_flags[index + 1]),
-                ])
-                index += 2
-                continue
-            if flag.startswith("--sysroot="):
+        remaining = iter(compiler_flags)
+        for flag in remaining:
+            if flag in PATH_OPTIONS:
+                path = next(remaining, None)
+                normalized.append(flag)
+                if path is not None:
+                    normalized.append(self._absolute_flag_path(path))
+            elif flag.startswith("--sysroot="):
                 path = flag.split("=", 1)[1]
                 normalized.append(f"--sysroot={self._absolute_flag_path(path)}")
-                index += 1
-                continue
-            joined = next(
-                (
-                    option
-                    for option in joined_options
-                    if flag.startswith(option) and flag != option
-                ),
-                None,
-            )
-            if joined is not None:
-                normalized.append(
-                    f"{joined}{self._absolute_flag_path(flag[len(joined):])}"
-                )
+            elif flag[:2] in ("-I", "-L") and len(flag) > 2:
+                normalized.append(flag[:2] + self._absolute_flag_path(flag[2:]))
             else:
                 normalized.append(flag)
-            index += 1
         return normalized
 
     def _absolute_flag_path(self, path: str | Path):
@@ -464,19 +418,7 @@ class AspisRunner(ProgramRunner):
         return str(flag_path if flag_path.is_absolute() else flag_path.resolve())
 
     def _aspis_mode_args(self):
-        data_args = {
-            DataProtectionMode.EDDI: ["--eddi"],
-            DataProtectionMode.SEDDI: ["--seddi"],
-            DataProtectionMode.FDSC: ["--fdsc"],
-            DataProtectionMode.NONE: ["--no-dup"],
-        }
-        control_args = {
-            ControlFlowMode.CFCSS: ["--cfcss"],
-            ControlFlowMode.RASM: ["--rasm"],
-            ControlFlowMode.INTER_RASM: ["--inter-rasm"],
-            ControlFlowMode.NONE: ["--no-cfc"],
-        }
-        return data_args[self.data_protection] + control_args[self.control_flow_protection]
+        return ASPIS_DATA_FLAGS[self.data_protection] + ASPIS_CONTROL_FLAGS[self.control_flow_protection]
 
 
 class CampaignRun:
@@ -498,26 +440,29 @@ class CampaignRun:
         self.results: list[dict] = []
 
     def run_campaign(self, args: list[str] | None = None, progress=None):
-        import json
-        from datetime import datetime
+        """Run every test of the campaign, writing the log and a JSON summary.
 
+        ``progress``, when given, is called with a dict describing each phase.
+        """
         self.log = []
         self.results = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.summary_path = self.log_path.with_name(
             f"{self.log_path.stem}_summary_{timestamp}.json"
         )
-        def report(phase):
-            if progress is not None:
-                progress({"test": run.name, "index": run_index,
-                          "total": len(self.campaign.runs), "phase": phase,
-                          "sources": ", ".join(run.programs)})
 
-        oracle_runners_cache = {}
-        aspis_runners_cache = {}
+        # Identical Oracle/ASPIS builds are shared between tests of the campaign.
+        oracle_cache = {}
+        aspis_cache = {}
         owned_runners = []
         try:
             for run_index, run in enumerate(self.campaign.runs, start=1):
+                def report(phase):
+                    if progress is not None:
+                        progress({"test": run.name, "index": run_index,
+                                  "total": len(self.campaign.runs), "phase": phase,
+                                  "sources": ", ".join(run.programs)})
+
                 report("Preparing test")
                 self.log.append(f"RUN NAME: {run.name}")
                 entry_source = self._entry_source(run.programs)
@@ -531,261 +476,17 @@ class CampaignRun:
                 except (OSError, UnicodeError) as error:
                     self.log.append(f"ERROR: CONFIGURATION [{run.name}]: Unable to read arguments: {error}")
                     continue
+                compiler_flags = shlex.join(run.compiler_flags) if run.compiler_flags else "(none)"
                 self.log.append(f"Sources: {', '.join(run.programs)}")
-                self.log.append(
-                    "Compiler flags: "
-                    f"{shlex.join(run.compiler_flags) if run.compiler_flags else '(none)'}"
-                )
-                self.log.append(
-                    f"Execution repetitions: {run.execution_repetitions}"
-                )
+                self.log.append(f"Compiler flags: {compiler_flags}")
+                self.log.append(f"Execution repetitions: {run.execution_repetitions}")
                 self.log.append(f"Per-process timeout: {run.timeout_ms} ms")
                 self.log.append(f"Args: {shlex.join(run_args) if run_args else '(none)'}")
 
                 try:
-                    if all(Path(p).suffix.lower() == ".rs" for p in run.programs):
-                        raise ValueError("Configuration: Rust symbol selection is supported, but this runner requires a C/C++ compilation toolchain.")
-                    for target in run.functions:
-                        if re.fullmatch(r"[A-Za-z_]\w*", target.name) is None:
-                            raise ValueError(f"Invalid debugger function name: {target.name}")
-                    vars_to_check = [
-                        var.name for tf in run.functions for var in tf.variables
-                    ]
-                    
-                    var_lengths = {}
-                    for tf in run.functions:
-                        for var in tf.variables:
-                            if var.length:
-                                var_lengths[var.name] = str(var.length)
-                                
-                    functions_to_check = [tf.name for tf in run.functions]
-                    measurement_repetitions = (
-                        (run.measurement_repetitions if run.measurement_repetitions is not None
-                         else run.execution_repetitions) if run.measure_overhead else 1
-                    )
-
-                    # Define caching keys
-                    oracle_cache_key = (
-                        tuple(run.programs),
-                        tuple(run.compiler_flags),
-                        tuple(run_args),
-                        tuple(vars_to_check),
-                        tuple(functions_to_check),
-                        run.measure_overhead,
-                        measurement_repetitions,
-                        run.timeout_ms,
-                    )
-                    aspis_cache_key = oracle_cache_key + (
-                        run.data_protection.name,
-                        run.control_flow_protection.name,
-                    )
-
-                    if oracle_cache_key in oracle_runners_cache:
-                        oracle_runner = oracle_runners_cache[oracle_cache_key]
-                        oracle_results = oracle_runner.results
-                        report("Oracle execution loaded from cache")
-                    else:
-                        oracle_runner = OracleRunner(
-                            self.environment, self.debugger, timeout_ms=run.timeout_ms
-                        )
-                        owned_runners.append(oracle_runner)
-                        report("Compiling Oracle")
-                        oracle_runner.compile(run.programs, run.compiler_flags)
-                        report(f"Oracle execution (measurements) and debugger snapshot")
-                        execute_kwargs = {"measure_overhead": run.measure_overhead}
-                        if var_lengths:
-                            execute_kwargs["var_lengths"] = var_lengths
-                        oracle_results = oracle_runner.execute(
-                            run_args,
-                            vars_to_check,
-                            measurement_repetitions,
-                            functions_to_check,
-                            **execute_kwargs,
-                        )
-                        oracle_runners_cache[oracle_cache_key] = oracle_runner
-
-                    if aspis_cache_key in aspis_runners_cache:
-                        aspis_runner = aspis_runners_cache[aspis_cache_key]
-                        aspis_results = aspis_runner.results
-                        report("ASPIS execution loaded from cache")
-                    else:
-                        aspis_runner = AspisRunner(
-                            self.environment,
-                            data_protection=run.data_protection,
-                            control_flow_protection=run.control_flow_protection,
-                            debugger=self.debugger,
-                            timeout_ms=run.timeout_ms,
-                        )
-                        owned_runners.append(aspis_runner)
-                        report("Compiling ASPIS")
-                        aspis_runner.compile(run.programs, run.compiler_flags)
-                        report(f"ASPIS execution (measurements) and debugger snapshot")
-                        execute_kwargs = {"measure_overhead": run.measure_overhead}
-                        if var_lengths:
-                            execute_kwargs["var_lengths"] = var_lengths
-                        aspis_results = aspis_runner.execute(
-                            run_args,
-                            vars_to_check,
-                            measurement_repetitions,
-                            functions_to_check,
-                            **execute_kwargs,
-                        )
-                        aspis_runners_cache[aspis_cache_key] = aspis_runner
-
-                    differences = self._measurement_differences(
-                        oracle_results, aspis_results
-                    ) if run.measure_overhead else {}
-                    injections = []
-                    def _run_inj(inj):
-                        start_count = len(injections)
-                        failures = []
-                        def record(result):
-                            if result.event == TerminationEvent.INTERNAL_ERROR:
-                                detail = (result.state.error or result.state.stderr
-                                          or result.state.debugger_output[-500:])
-                                raise RuntimeError(f"Debugger failed during injection: {detail}")
-                            injections.append((result, target_function))
-                        def injection_progress(label):
-                            report(f"{label}: {target_function.name} · "
-                                   f"{len(injections) - start_count}/{run.execution_repetitions} injections "
-                                   f"· {len(failures)} failed attempts")
-                        injection_progress("Profiling / fault injection")
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            futures = [
-                                executor.submit(inj.run, run_args)
-                                for _ in range(run.execution_repetitions)
-                            ]
-                            for future in concurrent.futures.as_completed(futures):
-                                try:
-                                    result = future.result()
-                                    record(result)
-                                    self.log.append(f"Injection result: {result}")
-                                except Exception as e:
-                                    failures.append(e)
-                                injection_progress("Fault injection")
-
-                        # Debugger startup/profiling can fail transiently under a
-                        # highly concurrent campaign. Replace failed attempts so
-                        # every result always contains the configured sample size.
-                        retry_budget = run.execution_repetitions
-                        while (
-                            len(injections) - start_count < run.execution_repetitions
-                            and retry_budget > 0
-                        ):
-                            retry_budget -= 1
-                            injection_progress("Retrying injection")
-                            try:
-                                result = inj.run(run_args)
-                                record(result)
-                                self.log.append(f"Injection retry result: {result}")
-                            except Exception as error:
-                                failures.append(error)
-                            injection_progress("Fault injection")
-                        completed = len(injections) - start_count
-                        if completed != run.execution_repetitions:
-                            details = str(failures[-1]) if failures else "unknown error"
-                            raise RuntimeError(
-                                "Injection campaign incomplete: "
-                                f"expected {run.execution_repetitions}, got {completed}. "
-                                f"Last error: {details}"
-                            )
-                        if failures:
-                            self.log.append(
-                                f"Recovered {len(failures)} transient injection error(s)."
-                            )
-
-                    for target_function in run.functions:
-                        injectors = BaseInjector.create_for_target(
-                            run.injection,
-                            self.environment,
-                            aspis_runner.exe,
-                            entry_source,
-                            target_function,
-                            debugger=self.debugger,
-                            timeout_ms=run.timeout_ms,
-                        )
-                        for injector in injectors:
-                            _run_inj(injector)
-
-                    report("Classifying results")
-                    # Classify injection results
-                    injection_summary = {
-                        "total": len(injections),
-                        "masked": 0,
-                        "sdc": 0,
-                        "latent": 0,
-                        "timeout": 0,
-                        "crash": 0,
-                        "aspis_data": 0,
-                        "aspis_cf": 0,
-                        "sdc_states": [],
-                        "latent_states": []
-                    }
-                
-                    for inj_result, injected_function in injections:
-                        oracle_vars = oracle_results.get("snapshots", {}).get(
-                            injected_function.name, oracle_results
-                        ).get("variables", {})
-                        event = inj_result.event
-                        if event == TerminationEvent.TIMEOUT:
-                            injection_summary["timeout"] += 1
-                        elif event == TerminationEvent.CRASHED:
-                            injection_summary["crash"] += 1
-                        elif event == TerminationEvent.ASPIS_DATA:
-                            injection_summary["aspis_data"] += 1
-                        elif event == TerminationEvent.ASPIS_CF:
-                            injection_summary["aspis_cf"] += 1
-                        elif event == TerminationEvent.RETURNED:
-                            # Check if state matches oracle
-                            state = inj_result.state
-                            output_differs = False
-                            state_differs = False
-                        
-                            if state.stdout != oracle_results.get("stdout", ""):
-                                output_differs = True
-                            elif state.stderr != oracle_results.get("stderr", ""):
-                                output_differs = True
-                            
-                            for variable in injected_function.variables:
-                                var_name = variable.name
-                                val1 = str(state.variables.get(var_name, ""))
-                                val2 = str(oracle_vars.get(var_name, ""))
-                                if val1 != val2:
-                                    import re as _re
-                                    if _re.fullmatch(r"0x[0-9a-fA-F]+", val1) and _re.fullmatch(r"0x[0-9a-fA-F]+", val2):
-                                        continue
-                                    state_differs = True
-                                    break
-                                
-                            if output_differs:
-                                injection_summary["sdc"] += 1
-                                # Save state as dict
-                                from dataclasses import asdict
-                                injection_summary["sdc_states"].append({**asdict(state), "function": injected_function.name})
-                            elif state_differs:
-                                injection_summary["latent"] += 1
-                                from dataclasses import asdict
-                                injection_summary["latent_states"].append({**asdict(state), "function": injected_function.name})
-                            else:
-                                injection_summary["masked"] += 1
-
-                    self.results.append(
-                        {
-                            "name": run.name,
-                            "timeout_ms": run.timeout_ms,
-                            "oracle": oracle_results,
-                            "aspis": aspis_results,
-                            "difference": differences,
-                            "injections": injection_summary,
-                        }
-                    )
-
-                    report("Saving analysis")
-                    # Save results to JSON
-                    atomic_write_text(self.summary_path, json.dumps(self.results, indent=2))
-
-                    self.log.extend(
-                        self._comparison_lines(oracle_results, aspis_results, vars_to_check, run.measure_overhead)
+                    self._run_test(
+                        run, run_args, entry_source, report,
+                        oracle_cache, aspis_cache, owned_runners,
                     )
                 except (ValueError, FileNotFoundError) as error:
                     self.log.append(f"ERROR: CONFIGURATION [{run.name}]: {error}")
@@ -798,10 +499,252 @@ class CampaignRun:
             self.log_path.write_text("\n".join(self.log), encoding="utf-8")
         return self.log
 
+    def _run_test(
+        self, run, run_args, entry_source, report,
+        oracle_cache, aspis_cache, owned_runners,
+    ):
+        """Build and run Oracle and ASPIS, inject faults, and record the results."""
+        if all(Path(p).suffix.lower() == ".rs" for p in run.programs):
+            raise ValueError("Configuration: Rust symbol selection is supported, but this runner requires a C/C++ compilation toolchain.")
+        for target in run.functions:
+            if IDENTIFIER.fullmatch(target.name) is None:
+                raise ValueError(f"Invalid debugger function name: {target.name}")
+
+        vars_to_check = [var.name for tf in run.functions for var in tf.variables]
+        var_lengths = {
+            var.name: str(var.length)
+            for tf in run.functions for var in tf.variables if var.length
+        }
+        functions_to_check = [tf.name for tf in run.functions]
+        if not run.measure_overhead:
+            measurement_repetitions = 1
+        elif run.measurement_repetitions is not None:
+            measurement_repetitions = run.measurement_repetitions
+        else:
+            measurement_repetitions = run.execution_repetitions
+
+        execute_args = (run_args, vars_to_check, measurement_repetitions, functions_to_check)
+        execute_kwargs = {"measure_overhead": run.measure_overhead}
+        if var_lengths:
+            execute_kwargs["var_lengths"] = var_lengths
+
+        oracle_key = (
+            tuple(run.programs),
+            tuple(run.compiler_flags),
+            tuple(run_args),
+            tuple(vars_to_check),
+            tuple(functions_to_check),
+            run.measure_overhead,
+            measurement_repetitions,
+            run.timeout_ms,
+        )
+        aspis_key = oracle_key + (
+            run.data_protection.name,
+            run.control_flow_protection.name,
+        )
+
+        _, oracle_results = self._build_and_execute(
+            "Oracle", oracle_cache, oracle_key, owned_runners, run, report,
+            lambda: OracleRunner(self.environment, self.debugger, timeout_ms=run.timeout_ms),
+            execute_args, execute_kwargs,
+        )
+        aspis_runner, aspis_results = self._build_and_execute(
+            "ASPIS", aspis_cache, aspis_key, owned_runners, run, report,
+            lambda: AspisRunner(
+                self.environment,
+                data_protection=run.data_protection,
+                control_flow_protection=run.control_flow_protection,
+                debugger=self.debugger,
+                timeout_ms=run.timeout_ms,
+            ),
+            execute_args, execute_kwargs,
+        )
+
+        differences = (
+            self._measurement_differences(oracle_results, aspis_results)
+            if run.measure_overhead else {}
+        )
+
+        injections = []
+        for target_function in run.functions:
+            injectors = BaseInjector.create_for_target(
+                run.injection,
+                self.environment,
+                aspis_runner.exe,
+                entry_source,
+                target_function,
+                debugger=self.debugger,
+                timeout_ms=run.timeout_ms,
+            )
+            for injector in injectors:
+                results = self._run_injector(injector, run, run_args, target_function, report)
+                injections.extend((result, target_function) for result in results)
+
+        report("Classifying results")
+        self.results.append(
+            {
+                "name": run.name,
+                "timeout_ms": run.timeout_ms,
+                "oracle": oracle_results,
+                "aspis": aspis_results,
+                "difference": differences,
+                "injections": self._classify_injections(injections, oracle_results),
+            }
+        )
+
+        report("Saving analysis")
+        atomic_write_text(self.summary_path, json.dumps(self.results, indent=2))
+
+        self.log.extend(
+            self._comparison_lines(oracle_results, aspis_results, vars_to_check, run.measure_overhead)
+        )
+
+    def _build_and_execute(
+        self, label, cache, key, owned_runners, run, report,
+        create_runner, execute_args, execute_kwargs,
+    ):
+        """Return ``(runner, results)``, reusing a cached runner when possible."""
+        if key in cache:
+            runner = cache[key]
+            report(f"{label} execution loaded from cache")
+            return runner, runner.results
+
+        runner = create_runner()
+        owned_runners.append(runner)
+        report(f"Compiling {label}")
+        runner.compile(run.programs, run.compiler_flags)
+        report(f"{label} execution (measurements) and debugger snapshot")
+        results = runner.execute(*execute_args, **execute_kwargs)
+        cache[key] = runner
+        return runner, results
+
+    def _run_injector(self, injector, run, run_args, target_function, report):
+        """Run ``run.execution_repetitions`` injections concurrently.
+
+        Debugger startup/profiling can fail transiently under a highly
+        concurrent campaign, so failed attempts are retried (up to as many
+        extra attempts as repetitions) to always reach the configured sample
+        size. A debugger that fails *during* an injection is not retried.
+        """
+        wanted = run.execution_repetitions
+        results = []
+        failures = []
+
+        def record(result):
+            if result.event == TerminationEvent.INTERNAL_ERROR:
+                detail = (result.state.error or result.state.stderr
+                          or result.state.debugger_output[-500:])
+                raise RuntimeError(f"Debugger failed during injection: {detail}")
+            results.append(result)
+
+        def show_progress(label):
+            report(f"{label}: {target_function.name} · "
+                   f"{len(results)}/{wanted} injections "
+                   f"· {len(failures)} failed attempts")
+
+        show_progress("Profiling / fault injection")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(injector.run, run_args) for _ in range(wanted)]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    record(result)
+                    self.log.append(f"Injection result: {result}")
+                except Exception as error:
+                    failures.append(error)
+                show_progress("Fault injection")
+
+        retry_budget = wanted
+        while len(results) < wanted and retry_budget > 0:
+            retry_budget -= 1
+            show_progress("Retrying injection")
+            try:
+                result = injector.run(run_args)
+                record(result)
+                self.log.append(f"Injection retry result: {result}")
+            except Exception as error:
+                failures.append(error)
+            show_progress("Fault injection")
+
+        if len(results) != wanted:
+            details = str(failures[-1]) if failures else "unknown error"
+            raise RuntimeError(
+                "Injection campaign incomplete: "
+                f"expected {wanted}, got {len(results)}. "
+                f"Last error: {details}"
+            )
+        if failures:
+            self.log.append(f"Recovered {len(failures)} transient injection error(s).")
+        return results
+
+    def _classify_injections(self, injections, oracle_results: dict):
+        """Count the outcome of each ``(result, target_function)`` injection.
+
+        A run that returns normally is an SDC when its output differs from the
+        Oracle, latent when only a selected variable differs, masked otherwise.
+        """
+        summary = {
+            "total": len(injections),
+            "masked": 0,
+            "sdc": 0,
+            "latent": 0,
+            "timeout": 0,
+            "crash": 0,
+            "aspis_data": 0,
+            "aspis_cf": 0,
+            "sdc_states": [],
+            "latent_states": [],
+        }
+        counters = {
+            TerminationEvent.TIMEOUT: "timeout",
+            TerminationEvent.CRASHED: "crash",
+            TerminationEvent.ASPIS_DATA: "aspis_data",
+            TerminationEvent.ASPIS_CF: "aspis_cf",
+        }
+        for result, function in injections:
+            if result.event in counters:
+                summary[counters[result.event]] += 1
+                continue
+            if result.event != TerminationEvent.RETURNED:
+                continue
+
+            state = result.state
+            oracle_vars = oracle_results.get("snapshots", {}).get(
+                function.name, oracle_results
+            ).get("variables", {})
+            output_differs = (
+                state.stdout != oracle_results.get("stdout", "")
+                or state.stderr != oracle_results.get("stderr", "")
+            )
+            state_differs = any(
+                self._values_differ(
+                    str(state.variables.get(variable.name, "")),
+                    str(oracle_vars.get(variable.name, "")),
+                )
+                for variable in function.variables
+            )
+            if output_differs:
+                summary["sdc"] += 1
+                summary["sdc_states"].append({**asdict(state), "function": function.name})
+            elif state_differs:
+                summary["latent"] += 1
+                summary["latent_states"].append({**asdict(state), "function": function.name})
+            else:
+                summary["masked"] += 1
+        return summary
+
+    @staticmethod
+    def _values_differ(injected: str, expected: str) -> bool:
+        # Two different addresses are not a corruption: ASPIS changes the layout.
+        if injected == expected:
+            return False
+        return not (HEX_ADDRESS.fullmatch(injected) and HEX_ADDRESS.fullmatch(expected))
+
     def _entry_source(self, programs: list[str]):
         return next((program for program in programs if Path(program).suffix in {".c", ".cpp", ".rs"}), None)
 
     def _args_from_values_file(self, source_file: str | Path):
+        """Read ``args[N] = value`` lines from the ``.values`` file next to the source."""
         values_path = Path(source_file).with_suffix(".values")
         if not values_path.is_file():
             return []
@@ -815,9 +758,8 @@ class CampaignRun:
 
     def _comparison_lines(self, oracle_results: dict, aspis_results: dict, vars_to_check: list[str], measure_overhead: bool = True):
         lines = ["Comparison:"]
-        lines.extend(self._field_comparison("returncode", oracle_results, aspis_results))
-        lines.extend(self._field_comparison("stdout", oracle_results, aspis_results))
-        lines.extend(self._field_comparison("stderr", oracle_results, aspis_results))
+        for field in ("returncode", "stdout", "stderr"):
+            lines.extend(self._field_comparison(field, oracle_results, aspis_results))
         if measure_overhead:
             lines.extend(self._measurement_lines(oracle_results, aspis_results))
 
@@ -836,8 +778,7 @@ class CampaignRun:
         differences = {}
         for field in ("execution_time_seconds", "binary_size_bytes"):
             oracle_value = oracle_results[field]
-            aspis_value = aspis_results[field]
-            delta = aspis_value - oracle_value
+            delta = aspis_results[field] - oracle_value
             differences[field] = {
                 "absolute": delta,
                 "percent": (delta / oracle_value * 100) if oracle_value else None,
@@ -846,29 +787,25 @@ class CampaignRun:
 
     def _measurement_lines(self, oracle_results: dict, aspis_results: dict):
         differences = self._measurement_differences(oracle_results, aspis_results)
-        lines = ["measurements:"]
-        lines.append(
+        lines = [
+            "measurements:",
             "  measurement_repetitions: "
             f"oracle={oracle_results.get('measurement_repetitions', 1)}, "
-            f"aspis={aspis_results.get('measurement_repetitions', 1)}"
-        )
-        lines.append(
+            f"aspis={aspis_results.get('measurement_repetitions', 1)}",
             "  execution_time_standard_error_seconds: "
             f"oracle={oracle_results.get('execution_time_standard_error_seconds', 0.0)}, "
-            f"aspis={aspis_results.get('execution_time_standard_error_seconds', 0.0)}"
-        )
+            f"aspis={aspis_results.get('execution_time_standard_error_seconds', 0.0)}",
+        ]
         for field, unit in (
             ("execution_time_seconds", "s"),
             ("binary_size_bytes", "bytes"),
         ):
-            oracle_value = oracle_results[field]
-            aspis_value = aspis_results[field]
             difference = differences[field]
             percent = difference["percent"]
             percent_text = "n/a" if percent is None else f"{percent:+.2f}%"
             lines.append(
-                f"  {field}: oracle={oracle_value} {unit}, "
-                f"aspis={aspis_value} {unit}, "
+                f"  {field}: oracle={oracle_results[field]} {unit}, "
+                f"aspis={aspis_results[field]} {unit}, "
                 f"difference={difference['absolute']:+} {unit} ({percent_text})"
             )
         return lines
