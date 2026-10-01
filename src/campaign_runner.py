@@ -394,6 +394,7 @@ class AspisRunner(ProgramRunner):
         command = [
             str(aspis_script),
             "-g",
+            "-O0",
             "-o", Path(self.exe).name,
             "--build-dir", str(build_dir),
         ]
